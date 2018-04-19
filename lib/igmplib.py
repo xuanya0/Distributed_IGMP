@@ -41,6 +41,42 @@ from time import time
 
 # Cisco Query Interval == 60
 QueryInterval = 60
+class mcast_actioner():
+
+	def __init__(self, ev):
+		self.ev = ev
+		msg = ev.msg
+		self.dp = msg.datapath
+
+		self._mcast_grp_to_actions = {}
+
+	def add_port(self, mcast_grp_id, port):
+		if mcast_grp_id not in self._mcast_grp_to_actions:
+			self._mcast_grp_to_actions[mcast_grp_id] = set()
+		
+		self._mcast_grp_to_actions[mcast_grp_id].add(port)
+		# new port added, install flow
+		self.sync_flow(mcast_grp_id)
+
+	def del_port(self, mcast_grp_id, port):
+		self._mcast_grp_to_actions[mcast_grp_id].remove(port)
+		self.sync_flow(mcast_grp_id)
+
+	def sync_flow(self, mcast_action_group_id):
+
+		ofp = self.dp.ofproto
+		ofp_parser = self.dp.ofproto_parser
+		# actions = [ofp_parser.OFPActionOutput(port) for port in self._mcast_grp_to_actions[mcast_action_group_id]]
+		# buckets = [ofp_parser.OFPBucket(actions=actions)]
+
+		# some weird stuff, you obviously cannot have more than 1 output action in a single bucket?????
+		buckets = [ofp_parser.OFPBucket(actions=[ofp_parser.OFPActionOutput(port)]) 
+			for port in self._mcast_grp_to_actions[mcast_action_group_id]]
+
+		mod = ofp_parser.OFPGroupMod(self.dp, ofp.OFPGC_MODIFY, ofp.OFPGT_ALL, mcast_action_group_id, buckets)
+		self.dp.send_msg(mod)
+
+
 
 class IgmpListeners():
 	# this is a listener class that keeps track of downstream dst for mcast
@@ -50,15 +86,14 @@ class IgmpListeners():
 	# Query Interval: 125
 	# Query Response Interval: 100 (10 sec)
 
-	def __init__(self, ports_in_grp, port_no):
+	def __init__(self, ports_in_grp, port_no, func_del_port):
 		self.ports_in_grp = ports_in_grp
 		self.port_no = port_no
-
+		self.func_del_port = func_del_port
 
 		self._timeout = QueryInterval + 10
 		self.timer = 0
 		self.listeners_addrs = set()
-
 
 	def add_listener(self, addr):
 		self.listeners_addrs.add(addr)
@@ -81,8 +116,10 @@ class IgmpListeners():
 			self.terminate()
 
 	def terminate(self):
+
+		# remove myself from the action group and the mcast record
+		self.func_del_port(self.port_no)
 		self.ports_in_grp.pop(self.port_no)
-	
 
 class IgmpQuerier():
 	
@@ -96,7 +133,7 @@ class IgmpQuerier():
 		self.reg_ports = reg_ports
 		self.vtep_ports = vtep_ports
 		self._mcast = {}
-		# self._mcast_to_flow = {}
+		self._mcast_actioner = mcast_actioner(ev)
 
 		# set the timer's resolution in second
 		self.timing_resolution = 1
@@ -110,6 +147,7 @@ class IgmpQuerier():
 			self.monitor_win = new_fifo_window(win_path)
 			self.monitor_win.write("hello @", win_path, "this dpid:", str(datapath.id))
 			self.monitor_tid = hub.spawn(self._monitor_thread)
+
 
 	def _monitor_thread(self):
 		while True:
@@ -182,7 +220,7 @@ class IgmpQuerier():
 				self._leave_handler(req_igmp, in_port, req_ipv4)
 
 		else:
-			self.logger.info("Not an IGMP packet, impossible!!!")
+			self.logger.warning("Not an IGMP packet, impossible!!!")
 
 	# forward IGMP reports leaves to other controller
 	def _forward_regs_to_vteps(self, ev):
@@ -247,7 +285,7 @@ class IgmpQuerier():
 				data=res_pkt, in_port=ofproto.OFPP_LOCAL, actions=query_ports)
 			dp.send_msg(out)
 			hub.sleep(QueryInterval)
-			print("dp %s, igmp query sent" % dp.id)
+			self.logger.debug("dp %s, igmp query sent" % dp.id)
 
 	def _report_handler(self, report, listeners_port, req_ipv4):
 		"""the process when the querier received a REPORT message."""
@@ -259,10 +297,15 @@ class IgmpQuerier():
 			# Group id is 32-bit, the same length as IPv4, reuse it
 			self._add_group_entry(report.address, ip.text_to_int(report.address))
 
-		# add an associated listener
+		# add an associated listeners class
+		# this immediate expose traffic to a port
 		if (listeners_port not in self._mcast[report.address]):
-			self._mcast[report.address][listeners_port] = IgmpListeners(self._mcast[report.address], listeners_port)
-		
+			self._mcast_actioner.add_port(ip.text_to_int(report.address), listeners_port)
+
+			self._mcast[report.address][listeners_port] = IgmpListeners(
+				self._mcast[report.address], listeners_port,
+				lambda port_to_be_deleted: self._mcast_actioner.del_port(ip.text_to_int(report.address), port_to_be_deleted))
+
 		self._mcast[report.address][listeners_port].add_listener(req_ipv4.src)
 
 	def _leave_handler(self, leave, listeners_port, req_ipv4):
@@ -270,6 +313,7 @@ class IgmpQuerier():
 		if leave.address in self._mcast:
 			if listeners_port in self._mcast[leave.address]:
 				self._mcast[leave.address][listeners_port].del_listener(req_ipv4.src)
+
 
 	def _add_group_entry(self, mcast_addr, group_id):
 		datapath = self.dp
@@ -286,4 +330,3 @@ class IgmpQuerier():
 		inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
 		flow_mod = parser.OFPFlowMod(datapath=datapath, priority=1, match=match, instructions=inst)
 		datapath.send_msg(flow_mod)
-

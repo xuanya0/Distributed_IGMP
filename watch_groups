@@ -1,0 +1,1 @@
+watch -n 0.5 ovs-ofctl dump-groups -O OpenFlow14 $1

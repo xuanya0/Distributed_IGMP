@@ -15,7 +15,7 @@
 
 from ryu.base import app_manager
 from ryu.controller import ofp_event
-from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
+from ryu.controller.handler import HANDSHAKE_DISPATCHER ,CONFIG_DISPATCHER, MAIN_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_4
 
@@ -25,7 +25,7 @@ from ryu.lib.packet import ethernet, ipv4, in_proto
 from ryu.lib.packet import ether_types
 
 # Custom lib
-from lib.list_ethertypes import ethertype_bits_to_name
+from lib.msg_decoder import ethertype_bits_to_name, ofpet_no_to_text
 from lib.igmplib import IgmpQuerier
 from lib.io import new_fifo_window
 
@@ -48,6 +48,8 @@ class Gateways(app_manager.RyuApp):
 		self.vtep_ports = {}
 		self.reg_ports = {}
 		self.igmp_queriers = {}
+
+		self.unhandled = {}
 
 	def _monitor(self):
 		while True:
@@ -97,6 +99,15 @@ class Gateways(app_manager.RyuApp):
 
 		self.logger.info('Switch initialised: %s', datapath.id)
 
+	@set_ev_cls(ofp_event.EventOFPErrorMsg, [HANDSHAKE_DISPATCHER, CONFIG_DISPATCHER, MAIN_DISPATCHER])
+	def error_msg_handler(self, ev):
+		msg = ev.msg
+
+		self.logger.warning('OFPErrorMsg received:\n'
+							'type=0x%02x %s\n'
+							'code=0x%02x',
+							msg.type, ofpet_no_to_text[msg.type],
+							msg.code)
 
 	@set_ev_cls(ofp_event.EventOFPPortDescStatsReply, MAIN_DISPATCHER)
 	def port_desc_stats_reply_handler(self, ev):
@@ -145,11 +156,14 @@ class Gateways(app_manager.RyuApp):
 		pkt = packet.Packet(msg.data)
 		eth = pkt.get_protocol(ethernet.ethernet)
 
-		
+		"""
 		# intercept LLDP and discard
 		if eth.ethertype == ether_types.ETH_TYPE_LLDP:
 			return
+		"""
 
+		
+		
 		# Inspect IPv4
 		if eth.ethertype == ether_types.ETH_TYPE_IP:
 			ipv4_header = pkt.get_protocol(ipv4.ipv4)
@@ -163,8 +177,24 @@ class Gateways(app_manager.RyuApp):
 			if (ip.text_to_int("224.0.0.0")     <= ip.text_to_int(ipv4_header.dst) 
 				and 
 				ip.text_to_int(ipv4_header.dst) < ip.text_to_int("239.255.255.255")):
-				self.logger.info('discarding multicasting: %s', ipv4_header.dst)
+				self.logger.debug('discarding multicasting: %s', ipv4_header.dst)
 				return
+		
+		# intercept non-IP and discard for debugging IGMP
+		else:
+			if eth.ethertype not in self.unhandled:
+				self.unhandled[eth.ethertype] = 0
+
+			self.unhandled[eth.ethertype] += 1
+
+			# display discarded
+			self.logger.info('-----------------------')
+			for k,v in self.unhandled.iteritems():
+				self.logger.info('%s: %d', ethertype_bits_to_name[k], v)
+			
+			# discard!!!!!!!!!!!!!!!!!!!!!
+			# return
+
 
 
 		# Default mode, basic layer2 switching
@@ -183,7 +213,7 @@ class Gateways(app_manager.RyuApp):
 
 		dpid = datapath.id
 
-		self.logger.info("packet in dp:%s port:%s type:%s\nsrc:%s dst:%s", 
+		self.logger.debug("packet in dp:%s port:%s type:%s\nsrc:%s dst:%s", 
 			dpid, in_port, ethertype_bits_to_name[eth.ethertype],
 			src, dst)
 
@@ -204,7 +234,7 @@ class Gateways(app_manager.RyuApp):
 
 		# prevent flooding messaging from one vtep port to other vtep ports
 		if (in_port in self.vtep_ports[dpid] and out_port == ofproto.OFPP_FLOOD):
-			self.logger.info("flood packet at dp:%s in from port:%s", dpid, in_port)
+			self.logger.debug("flood packet at dp:%s in from port:%s", dpid, in_port)
 			actions = [parser.OFPActionOutput(port_it) for port_it in self.reg_ports[dpid]]
 
 		data = None
