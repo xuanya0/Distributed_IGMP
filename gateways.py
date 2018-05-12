@@ -59,10 +59,10 @@ class Gateways(app_manager.RyuApp):
 			# for it in self.port_stats_requesters:
 			# 	it[0].send_msg(it[2])
 			self.monitor1.write ("-------------------------------------------")
-			for k,v in self.vtep_ports.iteritems():
+			for k,v in self.vtep_ports.items():
 				self.monitor1.write ("dp=",k)
 				self.monitor1.write ("vtep ports",v)
-			for k,v in self.reg_ports.iteritems():
+			for k,v in self.reg_ports.items():
 				self.monitor1.write ("dp=",k)
 				self.monitor1.write ("reg ports",v)
 
@@ -76,11 +76,13 @@ class Gateways(app_manager.RyuApp):
 
 		self.mac_to_port.setdefault(datapath.id, {})
 		self.ip_to_port.setdefault(datapath.id, {})
-		self.vtep_ports.setdefault(datapath.id, set())
-		self.reg_ports.setdefault(datapath.id, set())
+
+		# a reconnected switch might have different port setup, so reset the dict
+		self.vtep_ports[datapath.id] = set()
+		self.reg_ports[datapath.id] = set()
 
 		# install table-miss flow entry.
-		# Ryu says OFPCML_NO_BUFFER due to bug in OVS prior to v2.1.0
+		# Ryu says use OFPCML_NO_BUFFER due to bug in OVS prior to v2.1.0
 		match = parser.OFPMatch()
 		actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
 		self.add_flow(datapath, 0, match, actions)
@@ -125,10 +127,10 @@ class Gateways(app_manager.RyuApp):
 
 
 		
-		# instantiate up multicast classes (which auto-spawn threads)
+		# instantiate IGMP classes (which auto-spawn threads)
+		if datapath.id in self.igmp_queriers:
+			self.igmp_queriers[datapath.id].__del__()
 		self.igmp_queriers[datapath.id] = IgmpQuerier(ev, self.reg_ports[datapath.id], self.vtep_ports[datapath.id], 'xterm_IGMP_monitor_'+str(datapath.id));
-
-
 
 		self.logger.info('OFPPortDescStatsReply received: %s', datapath.id)
 
@@ -156,11 +158,11 @@ class Gateways(app_manager.RyuApp):
 		pkt = packet.Packet(msg.data)
 		eth = pkt.get_protocol(ethernet.ethernet)
 
-		"""
+		
 		# intercept LLDP and discard
 		if eth.ethertype == ether_types.ETH_TYPE_LLDP:
 			return
-		"""
+		
 
 		
 		
@@ -174,22 +176,19 @@ class Gateways(app_manager.RyuApp):
 				return
 
 			# Intercept IPv4 Multicasting without flows & Discard
-			if (ip.text_to_int("224.0.0.0")     <= ip.text_to_int(ipv4_header.dst) 
-				and 
-				ip.text_to_int(ipv4_header.dst) < ip.text_to_int("239.255.255.255")):
+			if ((ip.text_to_int(ipv4_header.dst)>>28) == 0xE):
 				self.logger.debug('discarding multicasting: %s', ipv4_header.dst)
 				return
 		
 		# intercept non-IP and discard for debugging IGMP
 		else:
-			if eth.ethertype not in self.unhandled:
-				self.unhandled[eth.ethertype] = 0
+			self.unhandled.setdefault(eth.ethertype, 0)
 
 			self.unhandled[eth.ethertype] += 1
 
 			# display discarded
 			self.logger.info('-----------------------')
-			for k,v in self.unhandled.iteritems():
+			for k,v in self.unhandled.items():
 				self.logger.info('%s: %d', ethertype_bits_to_name[k], v)
 			
 			# discard!!!!!!!!!!!!!!!!!!!!!

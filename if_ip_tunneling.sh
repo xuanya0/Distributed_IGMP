@@ -16,24 +16,26 @@ echo "tunneling interface pairs setup s3-s6------------------------------------"
 ip addr add 10.0.3.2/24 dev s3-eth1
 
 
-echo "setting up gre interfaces btw s1_s2 -------------------------------------"
-ovs-vsctl add-port s1 tun1_2 -- set interface tun1_2 type=gre \
-options:local_ip=10.0.1.2 options:remote_ip=10.0.2.2
+tunneling_type="vxlan"
 
-ovs-vsctl add-port s2 tun2_1 -- set interface tun2_1 type=gre \
-options:local_ip=10.0.2.2 options:remote_ip=10.0.1.2
+echo "setting up tunneling interfaces btw s1_s2 -------------------------------------"
+ovs-vsctl add-port s1 tun1_2 -- set interface tun1_2 type=$tunneling_type \
+options:local_ip=10.0.1.2 options:remote_ip=10.0.2.2 options:key=flow
 
-echo "setting up gre interfaces btw s1_s3 -------------------------------------"
-ovs-vsctl add-port s1 tun1_3 -- set interface tun1_3 type=gre \
-options:local_ip=10.0.1.2 options:remote_ip=10.0.3.2
+ovs-vsctl add-port s2 tun2_1 -- set interface tun2_1 type=$tunneling_type \
+options:local_ip=10.0.2.2 options:remote_ip=10.0.1.2 options:key=flow
 
-ovs-vsctl add-port s3 tun3_1 -- set interface tun3_1 type=gre \
-options:local_ip=10.0.3.2 options:remote_ip=10.0.1.2
+echo "setting up tunneling interfaces btw s1_s3 -------------------------------------"
+ovs-vsctl add-port s1 tun1_3 -- set interface tun1_3 type=$tunneling_type \
+options:local_ip=10.0.1.2 options:remote_ip=10.0.3.2 options:key=flow
+
+ovs-vsctl add-port s3 tun3_1 -- set interface tun3_1 type=$tunneling_type \
+options:local_ip=10.0.3.2 options:remote_ip=10.0.1.2 options:key=flow
 
 
-echo "setting up gre interfaces btw s2_s3 -------------------------------------"
-ovs-vsctl add-port s2 tun2_3 -- set interface tun2_3 type=gre \
-options:local_ip=10.0.2.2 options:remote_ip=10.0.3.2
+echo "setting up tunneling interfaces btw s2_s3 -------------------------------------"
+ovs-vsctl add-port s2 tun2_3 -- set interface tun2_3 type=$tunneling_type \
+options:local_ip=10.0.2.2 options:remote_ip=10.0.3.2 options:key=flow
 
-ovs-vsctl add-port s3 tun3_2 -- set interface tun3_2 type=gre \
-options:local_ip=10.0.3.2 options:remote_ip=10.0.2.2
+ovs-vsctl add-port s3 tun3_2 -- set interface tun3_2 type=$tunneling_type \
+options:local_ip=10.0.3.2 options:remote_ip=10.0.2.2 options:key=flow

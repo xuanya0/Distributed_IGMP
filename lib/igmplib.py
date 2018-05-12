@@ -26,9 +26,6 @@ from ryu.controller.handler import MAIN_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ether
 from ryu.ofproto import inet
-from ryu.ofproto import ofproto_v1_0
-from ryu.ofproto import ofproto_v1_2
-from ryu.ofproto import ofproto_v1_3
 from ryu.lib import hub, ip
 from ryu.lib.dpid import dpid_to_str
 from ryu.lib.packet import packet
@@ -48,32 +45,48 @@ class mcast_actioner():
 		msg = ev.msg
 		self.dp = msg.datapath
 
+		# each mcast address will be splitted into two action groups
+		# one for local ports, one for upstream ports (remote)
 		self._mcast_grp_to_actions = {}
+		# dict -> action group -> port # -> taggings
 
-	def add_port(self, mcast_grp_id, port):
-		if mcast_grp_id not in self._mcast_grp_to_actions:
-			self._mcast_grp_to_actions[mcast_grp_id] = set()
+	def add_port(self, mcast_AG_id, port, egress_tagging=None):
+		# egress tagging should be in the format of a dict
+		# e.g. {'vlan_vid': 0x1000}, {'mpls_label': 0x12345678}
+
+		# create a dict if non-existent
+		self._mcast_grp_to_actions.setdefault(mcast_AG_id, {})
 		
-		self._mcast_grp_to_actions[mcast_grp_id].add(port)
+		self._mcast_grp_to_actions[mcast_AG_id][port] = egress_tagging
 		# new port added, install flow
-		self.sync_flow(mcast_grp_id)
+		self.sync_flow(mcast_AG_id)
 
-	def del_port(self, mcast_grp_id, port):
-		self._mcast_grp_to_actions[mcast_grp_id].remove(port)
-		self.sync_flow(mcast_grp_id)
+	def del_port(self, mcast_AG_id, port):
+		self._mcast_grp_to_actions[mcast_AG_id].pop(port, None)
+		self.sync_flow(mcast_AG_id)
 
-	def sync_flow(self, mcast_action_group_id):
+	def sync_flow(self, mcast_AG_id):
 
 		ofp = self.dp.ofproto
 		ofp_parser = self.dp.ofproto_parser
-		# actions = [ofp_parser.OFPActionOutput(port) for port in self._mcast_grp_to_actions[mcast_action_group_id]]
+		
+		# ----------------------------------------------------------------
+		# actions = [ofp_parser.OFPActionOutput(port) for port in self._mcast_grp_to_actions[mcast_AG_id]]
 		# buckets = [ofp_parser.OFPBucket(actions=actions)]
 
 		# some weird stuff, you obviously cannot have more than 1 output action in a single bucket?????
-		buckets = [ofp_parser.OFPBucket(actions=[ofp_parser.OFPActionOutput(port)]) 
-			for port in self._mcast_grp_to_actions[mcast_action_group_id]]
+		buckets = []
+		for port, egress_tagging in self._mcast_grp_to_actions[mcast_AG_id].items():
+			actions=[]
+			# destination is remote
+			if egress_tagging:
+				actions.append(ofp_parser.OFPActionSetField(**egress_tagging))
 
-		mod = ofp_parser.OFPGroupMod(self.dp, ofp.OFPGC_MODIFY, ofp.OFPGT_ALL, mcast_action_group_id, buckets)
+			actions.append(ofp_parser.OFPActionOutput(port))
+			buckets.append(ofp_parser.OFPBucket(actions=actions))
+		# ----------------------------------------------------------------
+
+		mod = ofp_parser.OFPGroupMod(self.dp, ofp.OFPGC_MODIFY, ofp.OFPGT_ALL, mcast_AG_id, buckets)
 		self.dp.send_msg(mod)
 
 
@@ -128,12 +141,34 @@ class IgmpQuerier():
 		self.logger = logging.getLogger(self.name)
 
 		msg = ev.msg
-		datapath = msg.datapath
-		self.dp = datapath
+		dp = msg.datapath
+		parser = dp.ofproto_parser
+
+		self.dp = dp
 		self.reg_ports = reg_ports
 		self.vtep_ports = vtep_ports
 		self._mcast = {}
 		self._mcast_actioner = mcast_actioner(ev)
+
+
+		# there are 0xfe tables
+		# set up a flow table specifically for multicast
+		self._from_local_table = 0x10
+		self._from_remote_table = 0x11
+
+		# set up two tables for different origins-------------------------------------------------------
+		# redirect all multicast from local traffic to local table
+		match = parser.OFPMatch(tunnel_id=0, eth_type=ether_types.ETH_TYPE_IP, ipv4_dst='224.0.0.0/4')
+		inst = [parser.OFPInstructionGotoTable(self._from_local_table)]
+		flow_mod = parser.OFPFlowMod(datapath=dp, priority=1, match=match, instructions=inst)
+		dp.send_msg(flow_mod)
+
+		# redirect all multicast from remote traffic to remote table
+		match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst='224.0.0.0/4')
+		inst = [parser.OFPInstructionGotoTable(self._from_remote_table)]
+		flow_mod = parser.OFPFlowMod(datapath=dp, priority=1, match=match, instructions=inst)
+		dp.send_msg(flow_mod)
+		# set up two tables for different origins-------------------------------------------------------
 
 		# set the timer's resolution in second
 		self.timing_resolution = 1
@@ -143,10 +178,18 @@ class IgmpQuerier():
 		self.timeout_tid = hub.spawn(self._timer_thread)
 
 		# spawn a monitor
-		if (win_path):
+		self.win_path = win_path
+		if win_path:
 			self.monitor_win = new_fifo_window(win_path)
-			self.monitor_win.write("hello @", win_path, "this dpid:", str(datapath.id))
+			self.monitor_win.write("hello @", win_path, "this dpid:", str(dp.id))
 			self.monitor_tid = hub.spawn(self._monitor_thread)
+
+	def __del__(self):
+
+		self.logger.info("IGMP@dp:%d going down-----------------------------", self.dp.id)
+		if self.win_path:
+			hub.kill(self.monitor_tid)
+			self.monitor_win.__del__()
 
 
 	def _monitor_thread(self):
@@ -225,9 +268,9 @@ class IgmpQuerier():
 	# forward IGMP reports leaves to other controller
 	def _forward_regs_to_vteps(self, ev):
 		msg = ev.msg
-		datapath = msg.datapath
-		ofproto = datapath.ofproto
-		parser = datapath.ofproto_parser
+		dp = msg.datapath
+		ofproto = dp.ofproto
+		parser = dp.ofproto_parser
 		in_port = msg.match['in_port']
 
 		# don't forward from vtep to vteps, preventing loops
@@ -239,9 +282,9 @@ class IgmpQuerier():
 		data = None
 		if msg.buffer_id == ofproto.OFP_NO_BUFFER:
 			data = msg.data
-		out =  parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
+		out =  parser.OFPPacketOut(datapath=dp, buffer_id=msg.buffer_id,
 								  in_port=in_port, actions=actions, data=data)
-		datapath.send_msg(out)
+		dp.send_msg(out)
 
 
 
@@ -289,23 +332,84 @@ class IgmpQuerier():
 
 	def _report_handler(self, report, listeners_port, req_ipv4):
 		"""the process when the querier received a REPORT message."""
+		dp = self.dp
+		ofproto = dp.ofproto
+		parser = dp.ofproto_parser
 
-		# create a mcast group entry
+		# Group id is 32-bit, the same length as IPv4, reuse it
+		# for local listeners, use it's mcast addr as action group IP E0.0.0.0/4
+		# for remote listeners, use mcast - 0x1000000 == D0.0.0.0/4
+		dst_AG_id_local = ip.text_to_int(report.address)
+		dst_AG_id_remote = ip.text_to_int(report.address) - 0x10000000
+
+		# create two flow tables and  mcast group entries
 		if (report.address not in self._mcast):
-			self._mcast.setdefault(report.address, {})
-			
-			# Group id is 32-bit, the same length as IPv4, reuse it
-			self._add_group_entry(report.address, ip.text_to_int(report.address))
+			self._mcast[report.address] = {}
+
+
+			# add a multicast group entry
+			grp_mod = parser.OFPGroupMod(dp, ofproto.OFPGC_ADD, ofproto.OFPGT_ALL, dst_AG_id_local, None)
+			dp.send_msg(grp_mod)
+			grp_mod = parser.OFPGroupMod(dp, ofproto.OFPGC_ADD, ofproto.OFPGT_ALL, dst_AG_id_remote, None)
+			dp.send_msg(grp_mod)
+
+
+			# install flows on both tables ----------------------------------------------------------vvvvvvvvvv
+			# a mcast arrives untagged, this is originated locally, add entry to local table, fwd to local & remote AGs
+			match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=report.address)
+			actions = [parser.OFPActionGroup(group_id) for group_id in [dst_AG_id_local, dst_AG_id_remote]]
+			inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+			flow_mod = parser.OFPFlowMod(datapath=dp, priority=1, match=match, instructions=inst, table_id=self._from_local_table)
+			dp.send_msg(flow_mod)
+
+			# a mcast arrives tagged, this is originated remotely, add entry to remote table, fwd to local AG only
+			match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=report.address)
+			actions = [parser.OFPActionGroup(group_id) for group_id in [dst_AG_id_local]]
+			inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+			flow_mod = parser.OFPFlowMod(datapath=dp, priority=1, match=match, instructions=inst, table_id=self._from_remote_table)
+			dp.send_msg(flow_mod)
+			# install flows on both tables ----------------------------------------------------------^^^^^^^^^^
+
+
+			"""
+			self._add_mcast_flow(from_local_match, [dst_AG_id_local, dst_AG_id_remote])
+			self._add_mcast_flow(from_remote_match, [dst_AG_id_local])
+
+			def _add_mcast_flow(self, match, group_ids):
+				datapath = self.dp
+				ofproto = datapath.ofproto
+				parser = datapath.ofproto_parser
+
+				# add a multicast flow entry that points to the group above
+				actions = [parser.OFPActionGroup(group_id) for group_id in group_ids]
+				inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+				flow_mod = parser.OFPFlowMod(datapath=datapath, priority=1, match=match, instructions=inst)
+				datapath.send_msg(flow_mod)
+			"""
+
 
 		# add an associated listeners class
 		# this immediate expose traffic to a port
 		if (listeners_port not in self._mcast[report.address]):
-			self._mcast_actioner.add_port(ip.text_to_int(report.address), listeners_port)
+			# if a listener resides locally, no tagging
+			if listeners_port in self.reg_ports:
+				self._mcast_actioner.add_port(dst_AG_id_local, listeners_port)
+				port_deleter = lambda port_to_be_deleted: self._mcast_actioner.del_port(
+					dst_AG_id_local, 
+					port_to_be_deleted)
+			# if a listener resides remotely, tag the egress packet
+			if listeners_port in self.vtep_ports:
+				self._mcast_actioner.add_port(dst_AG_id_remote, listeners_port, {'tunnel_id': 0x00001234})
+				port_deleter = lambda port_to_be_deleted: self._mcast_actioner.del_port(
+					dst_AG_id_remote, 
+					port_to_be_deleted)
 
+			# start a listeners class in control plane for the first listener at this port
 			self._mcast[report.address][listeners_port] = IgmpListeners(
-				self._mcast[report.address], listeners_port,
-				lambda port_to_be_deleted: self._mcast_actioner.del_port(ip.text_to_int(report.address), port_to_be_deleted))
+				self._mcast[report.address],
+				listeners_port, port_deleter)
 
+		# add a listener
 		self._mcast[report.address][listeners_port].add_listener(req_ipv4.src)
 
 	def _leave_handler(self, leave, listeners_port, req_ipv4):
@@ -315,18 +419,3 @@ class IgmpQuerier():
 				self._mcast[leave.address][listeners_port].del_listener(req_ipv4.src)
 
 
-	def _add_group_entry(self, mcast_addr, group_id):
-		datapath = self.dp
-		ofproto = datapath.ofproto
-		parser = datapath.ofproto_parser
-
-		# add a multicast group entry
-		grp_mod = parser.OFPGroupMod(datapath, ofproto.OFPGC_ADD, ofproto.OFPGT_ALL, group_id, None)
-		datapath.send_msg(grp_mod)
-
-		# add a multicast flow entry that points to the group above
-		match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=mcast_addr)
-		actions = [parser.OFPActionGroup(group_id)]
-		inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-		flow_mod = parser.OFPFlowMod(datapath=datapath, priority=1, match=match, instructions=inst)
-		datapath.send_msg(flow_mod)

@@ -38,12 +38,12 @@ def myNetwork():
     s1 = net.addSwitch('s1', cls=OVSKernelSwitch)
 
     info( '*** Add hosts\n')
-    h1 = net.addHost('h1', cls=Host, ip='172.16.0.1/24', defaultRoute=None)
-    h2 = net.addHost('h2', cls=Host, ip='172.16.0.2/24', defaultRoute=None)
-    h3 = net.addHost('h3', cls=Host, ip='172.16.0.3/24', defaultRoute=None)
-    h4 = net.addHost('h4', cls=Host, ip='172.16.0.4/24', defaultRoute=None)
-    h5 = net.addHost('h5', cls=Host, ip='172.16.0.5/24', defaultRoute=None)
-    h6 = net.addHost('h6', cls=Host, ip='172.16.0.6/24', defaultRoute=None)
+    h1 = net.addHost('h1', cls=Host, ip='172.16.0.1/24', defaultRoute='via 172.16.0.128')
+    h2 = net.addHost('h2', cls=Host, ip='172.16.0.2/24', defaultRoute='via 172.16.0.128')
+    h3 = net.addHost('h3', cls=Host, ip='172.16.0.3/24', defaultRoute='via 172.16.0.128')
+    h4 = net.addHost('h4', cls=Host, ip='172.16.0.4/24', defaultRoute='via 172.16.0.128')
+    h5 = net.addHost('h5', cls=Host, ip='172.16.0.5/24', defaultRoute='via 172.16.0.128')
+    h6 = net.addHost('h6', cls=Host, ip='172.16.0.6/24', defaultRoute='via 172.16.0.128')
 
     info( '*** Add links\n')
     
