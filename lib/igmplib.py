@@ -189,7 +189,8 @@ class IgmpQuerier():
 		self.logger.info("IGMP@dp:%d going down-----------------------------", self.dp.id)
 		if self.win_path:
 			hub.kill(self.monitor_tid)
-			self.monitor_win.__del__()
+			# self.monitor_win.__del__()
+			self.monitor_win = None
 
 
 	def _monitor_thread(self):
@@ -346,8 +347,7 @@ class IgmpQuerier():
 		if (report.address not in self._mcast):
 			self._mcast[report.address] = {}
 
-
-			# add a multicast group entry
+			# add two multicast group entries
 			grp_mod = parser.OFPGroupMod(dp, ofproto.OFPGC_ADD, ofproto.OFPGT_ALL, dst_AG_id_local, None)
 			dp.send_msg(grp_mod)
 			grp_mod = parser.OFPGroupMod(dp, ofproto.OFPGC_ADD, ofproto.OFPGT_ALL, dst_AG_id_remote, None)
@@ -369,23 +369,6 @@ class IgmpQuerier():
 			flow_mod = parser.OFPFlowMod(datapath=dp, priority=1, match=match, instructions=inst, table_id=self._from_remote_table)
 			dp.send_msg(flow_mod)
 			# install flows on both tables ----------------------------------------------------------^^^^^^^^^^
-
-
-			"""
-			self._add_mcast_flow(from_local_match, [dst_AG_id_local, dst_AG_id_remote])
-			self._add_mcast_flow(from_remote_match, [dst_AG_id_local])
-
-			def _add_mcast_flow(self, match, group_ids):
-				datapath = self.dp
-				ofproto = datapath.ofproto
-				parser = datapath.ofproto_parser
-
-				# add a multicast flow entry that points to the group above
-				actions = [parser.OFPActionGroup(group_id) for group_id in group_ids]
-				inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-				flow_mod = parser.OFPFlowMod(datapath=datapath, priority=1, match=match, instructions=inst)
-				datapath.send_msg(flow_mod)
-			"""
 
 
 		# add an associated listeners class

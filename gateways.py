@@ -124,12 +124,11 @@ class Gateways(app_manager.RyuApp):
 				self.vtep_ports[datapath.id].add(p.port_no)
 			else:
 				self.reg_ports[datapath.id].add(p.port_no)
-
-
 		
 		# instantiate IGMP classes (which auto-spawn threads)
 		if datapath.id in self.igmp_queriers:
 			self.igmp_queriers[datapath.id].__del__()
+			# del self.igmp_queriers[datapath.id]
 		self.igmp_queriers[datapath.id] = IgmpQuerier(ev, self.reg_ports[datapath.id], self.vtep_ports[datapath.id], 'xterm_IGMP_monitor_'+str(datapath.id));
 
 		self.logger.info('OFPPortDescStatsReply received: %s', datapath.id)
@@ -163,9 +162,6 @@ class Gateways(app_manager.RyuApp):
 		if eth.ethertype == ether_types.ETH_TYPE_LLDP:
 			return
 		
-
-		
-		
 		# Inspect IPv4
 		if eth.ethertype == ether_types.ETH_TYPE_IP:
 			ipv4_header = pkt.get_protocol(ipv4.ipv4)
@@ -187,9 +183,9 @@ class Gateways(app_manager.RyuApp):
 			self.unhandled[eth.ethertype] += 1
 
 			# display discarded
-			self.logger.info('-----------------------')
+			self.logger.debug('-----------------------')
 			for k,v in self.unhandled.items():
-				self.logger.info('%s: %d', ethertype_bits_to_name[k], v)
+				self.logger.debug('%s: %d', ethertype_bits_to_name[k], v)
 			
 			# discard!!!!!!!!!!!!!!!!!!!!!
 			# return

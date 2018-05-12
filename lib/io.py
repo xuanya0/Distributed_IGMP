@@ -20,5 +20,5 @@ class new_fifo_window():
 		self.fd.flush()
 
 	def __del__(self):
-		self.proc.terminate()
+		self.proc.kill()
 		os.remove(self.fifo_path)
