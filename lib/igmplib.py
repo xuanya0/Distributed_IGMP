@@ -136,7 +136,7 @@ class IgmpListeners():
 
 class IgmpQuerier():
 	
-	def __init__(self, ev, reg_ports, vtep_ports, win_path):
+	def __init__(self, ev, reg_ports, vtep_ports, win_path=None):
 		self.name = "IgmpQuerier"
 		self.logger = logging.getLogger(self.name)
 
