@@ -4,3 +4,11 @@ ovs-ofctl del-flows s3
 ovs-ofctl del-flows s4
 ovs-ofctl del-flows s5
 ovs-ofctl del-flows s6
+
+ovs-ofctl del-groups s1 -O OpenFlow14
+ovs-ofctl del-groups s2 -O OpenFlow14
+ovs-ofctl del-groups s3 -O OpenFlow14
+ovs-ofctl del-groups s4 -O OpenFlow14
+ovs-ofctl del-groups s5 -O OpenFlow14
+ovs-ofctl del-groups s6 -O OpenFlow14
+

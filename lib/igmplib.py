@@ -38,6 +38,10 @@ from time import time
 
 # Cisco Query Interval == 60
 QueryInterval = 60
+_mcast_flow_table = 30
+_mcast_flow_cookie = 30
+
+
 class mcast_actioner():
 
 	def __init__(self, ev, dpid_to_mpls):
@@ -51,67 +55,55 @@ class mcast_actioner():
 		self._mcast_grp_to_actions = {}
 		# dict -> action group -> port # -> taggings
 
-	def add_port(self, mcast_AG_id, port, remote_dpid=None):
+	def add_port(self, mcast_grp_addr, port, remote_dpid=None):
 
 		# create a dict for mcast grp if non-existent, for egress ports
-		self._mcast_grp_to_actions.setdefault(mcast_AG_id, {})
+		self._mcast_grp_to_actions.setdefault(mcast_grp_addr, {})
 		# create a set for egress port if non-existent, for remote dpids
-		self._mcast_grp_to_actions[mcast_AG_id].setdefault(remote_dpid, set())
+		self._mcast_grp_to_actions[mcast_grp_addr].setdefault(remote_dpid, set())
 
-		self._mcast_grp_to_actions[mcast_AG_id][remote_dpid].add(port)
+		self._mcast_grp_to_actions[mcast_grp_addr][remote_dpid].add(port)
 		
 		# new port added, install flow
-		self.sync_flow(mcast_AG_id)
+		self.sync_flow(mcast_grp_addr)
 
-	def del_port(self, mcast_AG_id, port, remote_dpid=None):
-		self._mcast_grp_to_actions[mcast_AG_id][remote_dpid].discard(port)
-		self.sync_flow(mcast_AG_id)
+	def del_port(self, mcast_grp_addr, port, remote_dpid=None):
+		self._mcast_grp_to_actions[mcast_grp_addr][remote_dpid].discard(port)
+		self.sync_flow(mcast_grp_addr)
 
-	def sync_flow(self, mcast_AG_id):
+	def sync_flow(self, mcast_grp_addr):
 		# egress tagging should be in the format of a dict
 		# e.g. {'vlan_vid': 0x1000}, {'mpls_label': 0x12345678}
 
 		ofp = self.dp.ofproto
 		ofp_parser = self.dp.ofproto_parser
-		
-		# ----------------------------------------------------------------
-		# actions = [ofp_parser.OFPActionOutput(port) for port in self._mcast_grp_to_actions[mcast_AG_id]]
-		# buckets = [ofp_parser.OFPBucket(actions=actions)]
 
-		
-		# some weird stuff, you obviously cannot have more than 1 output action in a single bucket?????
-		buckets = []
-		for remote_dpid, ports_set in self._mcast_grp_to_actions[mcast_AG_id].items():
-			actions = []
-			# if egress untagged:
+		# let's try single action list see if it works
+		actions = [ofp_parser.OFPActionPushMpls()]
+		for remote_dpid, ports_set in self._mcast_grp_to_actions[mcast_grp_addr].items():
+
+			# if egress untagged, prepend in the action
 			if not remote_dpid:
 				for port in ports_set:
-					actions.append(ofp_parser.OFPActionOutput(port))
-			# if egress tagged:
+					actions = [ofp_parser.OFPActionOutput(port)] + actions
+			# if egress tagged, append in the action:
 			else:
-				actions.append(ofp_parser.OFPActionPushMpls())
 				for port in ports_set:
 					actions.append(ofp_parser.OFPActionSetField(mpls_label=self.dpid_to_mpls[remote_dpid]))
 					actions.append(ofp_parser.OFPActionOutput(port))
-			buckets.append(ofp_parser.OFPBucket(actions=actions))
 
-		# # let's try single action list see if it works
-		# actions = [ofp_parser.OFPActionPushMpls()]
-		# for remote_dpid, ports_set in self._mcast_grp_to_actions[mcast_AG_id].items():
+		inst = [ofp_parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
 
-		# 	# if egress untagged, prepend in the action
-		# 	if not remote_dpid:
-		# 		for port in ports_set:
-		# 			actions = [ofp_parser.OFPActionOutput(port)] + actions
-		# 	# if egress tagged, append in the action:
-		# 	else:
-		# 		for port in ports_set:
-		# 			actions.append(ofp_parser.OFPActionSetField(mpls_label=self.dpid_to_mpls[remote_dpid]))
-		# 			actions.append(ofp_parser.OFPActionOutput(port))
-		# buckets = [ofp_parser.OFPBucket(actions=actions)]
-		# ----------------------------------------------------------------
-
-		mod = ofp_parser.OFPGroupMod(self.dp, ofp.OFPGC_MODIFY, ofp.OFPGT_ALL, mcast_AG_id, buckets)
+		# delete flows if no meaningful actions
+		if len(actions) <= 1:
+			mod = ofp_parser.OFPFlowMod(datapath=self.dp, cookie=_mcast_flow_cookie, cookie_mask=2**64-1, table_id=_mcast_flow_table, 
+				match=ofp_parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=mcast_grp_addr), priority=1,
+				command=ofp.OFPFC_DELETE, out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY)
+		else:
+			mod = ofp_parser.OFPFlowMod(datapath=self.dp, cookie=_mcast_flow_cookie, table_id=_mcast_flow_table, 
+				match=ofp_parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=mcast_grp_addr), priority=1,
+				instructions=inst)
+		
 		self.dp.send_msg(mod)
 
 
@@ -183,7 +175,8 @@ class IgmpQuerier():
 
 		# there are 0xfe tables
 		# set up a flow table specifically for multicast
-		self._mcast_flow_table = 30
+		self._mcast_flow_table = _mcast_flow_table
+		self._mcast_flow_cookie = _mcast_flow_cookie
 		self._ipv4_flow_table = ipv4_fwd_table
 
 
@@ -216,6 +209,7 @@ class IgmpQuerier():
 			self.monitor_win = new_fifo_window(win_path)
 			self.monitor_win.write("hello @", win_path, "this dpid:", str(dp.id))
 			self.monitor_tid = hub.spawn(self._monitor_thread)
+
 
 	def __del__(self):
 
@@ -332,35 +326,21 @@ class IgmpQuerier():
 		parser = dp.ofproto_parser
 
 		# Group id is 32-bit, the same length as IPv4, reuse it
-		# for local listeners, use it's mcast addr as action group IP E0.0.0.0/4
-		# for remote listeners, use mcast - 0x1000000 == D0.0.0.0/4
-		dst_AG_id = ip.text_to_int(report.address)
+
 
 		# mcast addr first used, create mcast group entries, install appropriate flows
 		if (report.address not in self._mcast):
 			self._mcast[report.address] = {}
-
-			# add multicast group entries
-			grp_mod = parser.OFPGroupMod(dp, ofproto.OFPGC_ADD, ofproto.OFPGT_ALL, dst_AG_id, None)
-			dp.send_msg(grp_mod)
-
-			# install flows on tables ----------------------------------------------------------vvvvvvvvvv
-			match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=report.address)
-			actions = [parser.OFPActionGroup(dst_AG_id)]
-			inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-			flow_mod = parser.OFPFlowMod(datapath=dp, priority=1, match=match, instructions=inst, table_id=self._mcast_flow_table)
-			dp.send_msg(flow_mod)
-			# install flows on tables ----------------------------------------------------------^^^^^^^^^^
 
 
 		# add an associated listeners class
 		# this immediate exposes traffic to a port
 		if ((listeners_port, remote_dpid) not in self._mcast[report.address]):
 			# if a listener resides remotely, tag the egress packet
-			self._mcast_actioner.add_port(dst_AG_id, listeners_port, remote_dpid)
+			self._mcast_actioner.add_port(report.address, listeners_port, remote_dpid)
 
 			# provide a method to delete flow when the last listener exits
-			action_cleanup = lambda listeners_port, remote_dpid: self._mcast_actioner.del_port(dst_AG_id, listeners_port, remote_dpid)
+			action_cleanup = lambda listeners_port, remote_dpid: self._mcast_actioner.del_port(report.address, listeners_port, remote_dpid)
 
 			# start a listeners class in control plane for the first listener at this port
 			self._mcast[report.address][(listeners_port, remote_dpid)] = IgmpListeners(
