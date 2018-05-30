@@ -21,7 +21,7 @@ from ryu.ofproto import ofproto_v1_4
 
 from ryu.lib import hub, ip
 from ryu.lib.packet import packet
-from ryu.lib.packet import ethernet, ipv4, in_proto
+from ryu.lib.packet import ethernet, ipv4, in_proto, arp
 from ryu.lib.packet import ether_types
 
 # Custom lib
@@ -36,38 +36,29 @@ class Gateways(app_manager.RyuApp):
 	def __init__(self, *args, **kwargs):
 		super(Gateways, self).__init__(*args, **kwargs)
 
-		#tmp_fifo = '/tmp/xterm_ryu_monitor_1'
-		#self.monitor1 = new_fifo_window(tmp_fifo)
-		#self.monitor1.write("hello @ " + tmp_fifo)
-
 		self.initialised_switches = set()
 
-		self.mac_to_port = {}
-		self.ip_to_port = {}
-		self.port_stats_requesters = []
 
-		self.queriers = []
-		self.vtep_ports = {}
-		self.reg_ports = {}
+		# only remember ip/mac belonging to my own subnet
+		self.ip_to_mac = {}
+		self.mac_to_port = {}
+
+		self.port_stats_requesters = []
 		self.igmp_queriers = {}
 
+		self.ipv4_fwd_table = 20
+
+		
+		# UI to be made for these preset parameters, this enables dynamic grid allocation --------------------------------
+		self.dpid_to_mpls = {1: 1, 2: 2, 3: 3}
+		# assign a subnet for each gateway, the first address being the gateway address
+		# give the gateway a mac so that hosts can ARP
+		self.dpid_to_subnet = {1: '172.16.1.0/24', 2: '172.16.2.0/24', 3: '172.16.3.0/24'}
+		self.gw_ip = {1: '172.16.1.1', 2: '172.16.2.1', 3: '172.16.3.1'}
+		self.gw_mac = {1: 'a6:65:bd:ca:2a:79', 2: 'a6:65:bd:ca:2a:17', 3: 'a6:65:bd:ca:2a:f2'}
+		# ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
 		self.unhandled = {}
-
-	def _monitor(self):
-		while True:
-			hub.sleep(3)
-			# list your periodic tasks here
-
-			# for it in self.port_stats_requesters:
-			# 	it[0].send_msg(it[2])
-			self.monitor1.write ("-------------------------------------------")
-			for k,v in self.vtep_ports.items():
-				self.monitor1.write ("dp=",k)
-				self.monitor1.write ("vtep ports",v)
-			for k,v in self.reg_ports.items():
-				self.monitor1.write ("dp=",k)
-				self.monitor1.write ("reg ports",v)
-
 
 	# invoked such as when a switch connects to this controller
 	@set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
@@ -82,32 +73,70 @@ class Gateways(app_manager.RyuApp):
 		else:
 			self.initialised_switches.add(dp.id)
 
+		self.ip_to_mac.setdefault(dp.id, {})
 		self.mac_to_port.setdefault(dp.id, {})
-		self.ip_to_port.setdefault(dp.id, {})
 
-		# a reconnected switch might have different port setup, so reset the dict
-		self.vtep_ports[dp.id] = set()
-		self.reg_ports[dp.id] = set()
+		# general rules--------------------flow table modification----------------------------vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+
+		# always elevate ARP to the controller in order to learn IP
+		match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_ARP)
+		actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
+		inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+		flow_mod = parser.OFPFlowMod(datapath=dp, priority=2**16-1, match=match, instructions=inst)
+		dp.send_msg(flow_mod)
+
+		# for IPv4 packets, go to IPv4 table
+		match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP)
+		next_pipeline = parser.OFPInstructionGotoTable(self.ipv4_fwd_table)
+		inst = [next_pipeline]
+		flow_mod = parser.OFPFlowMod(datapath=dp, priority=1, match=match, instructions=inst)
+		dp.send_msg(flow_mod)
+
 
 		# install table-miss flow entry.
 		# Ryu says use OFPCML_NO_BUFFER due to bug in OVS prior to v2.1.0
 		match = parser.OFPMatch()
 		actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
-		self.add_flow(dp, 0, match, actions)
+		inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+		flow_mod = parser.OFPFlowMod(datapath=dp, priority=0, match=match, instructions=inst)
+		dp.send_msg(flow_mod)
+		flow_mod = parser.OFPFlowMod(datapath=dp, table_id=self.ipv4_fwd_table, priority=0, match=match, instructions=inst)
+		dp.send_msg(flow_mod)
+		# general rules--------------------flow table modification----------------------------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-		# Always escalate control messages such as IGMP to controllers
-		# priority has 16 bits, here use highest priority
-		match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ip_proto=in_proto.IPPROTO_IGMP)
-		actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
-		self.add_flow(dp, 2**16-1, match, actions)
+		# install MPLS routing info for regular IP packet (unicast) to remote destinations
+		for dst_dpid, subnet in self.dpid_to_subnet.items():
+			if dp.id != dst_dpid:
+				
+				match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=self.dpid_to_subnet[dst_dpid])
+				actions = [parser.OFPActionPushMpls(), 
+							parser.OFPActionSetField(mpls_label=self.dpid_to_mpls[dst_dpid]),
+							parser.OFPActionOutput(1)]
+				inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+				flow_mod = parser.OFPFlowMod(datapath=dp, table_id=self.ipv4_fwd_table, priority=1, match=match, instructions=inst)
+				dp.send_msg(flow_mod)
 
-		# scan available ports
-		#req = parser.OFPPortStatsRequest(dp, 0, ofproto.OFPP_ANY)
-		req = parser.OFPPortDescStatsRequest(dp, 0)
-		#self.port_stats_requesters.append((dp,req,req2))
-		dp.send_msg(req)
+
+		# install MPLS routing info for incoming packets
+		# pop MPLS header and run it through the ipv4 flow table
+		match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_MPLS)
+		pop_tag_set_mac = parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, [parser.OFPActionPopMpls(ether_types.ETH_TYPE_IP), parser.OFPActionSetField(eth_src=self.gw_mac[dp.id])])
+		next_pipeline = parser.OFPInstructionGotoTable(self.ipv4_fwd_table)
+		inst = [pop_tag_set_mac, next_pipeline]
+		flow_mod = parser.OFPFlowMod(datapath=dp, priority=1, match=match, instructions=inst)
+		dp.send_msg(flow_mod)
+
+
+		# instantiate IGMP classes (which auto-spawns threads)
+		# assuming northbound port is always 1
+		self.igmp_queriers[dp.id] = IgmpQuerier(ev, self.igmp_queriers, self.ipv4_fwd_table, self.dpid_to_mpls, 1, 'xterm_IGMP_monitor_'+str(dp.id))
+
 
 		self.logger.info('Switch initialised: %s', dp.id)
+
+
+
+
 
 	@set_ev_cls(ofp_event.EventOFPErrorMsg, [HANDSHAKE_DISPATCHER, CONFIG_DISPATCHER, MAIN_DISPATCHER])
 	def error_msg_handler(self, ev):
@@ -118,42 +147,6 @@ class Gateways(app_manager.RyuApp):
 							'code=0x%02x',
 							msg.type, ofpet_no_to_text[msg.type],
 							msg.code)
-
-	@set_ev_cls(ofp_event.EventOFPPortDescStatsReply, MAIN_DISPATCHER)
-	def port_desc_stats_reply_handler(self, ev):
-		dp = ev.msg.datapath
-		ofproto = dp.ofproto
-		parser = dp.ofproto_parser
-
-		ports = []
-		for p in ev.msg.body:
-			# check if such name exists in port name, just to pick out specific ports
-			if ("tun" in p.name):
-				self.vtep_ports[dp.id].add(p.port_no)
-			else:
-				self.reg_ports[dp.id].add(p.port_no)
-		
-		# instantiate IGMP classes (which auto-spawn threads)
-		if dp.id in self.igmp_queriers:
-			self.igmp_queriers[dp.id].__del__()
-			# del self.igmp_queriers[dp.id]
-		
-		self.igmp_queriers[dp.id] = IgmpQuerier(ev, self.reg_ports[dp.id], self.vtep_ports[dp.id], 'xterm_IGMP_monitor_'+str(dp.id))
-
-		self.logger.info('OFPPortDescStatsReply received: %s', dp.id)
-
-
-	def add_flow(self, datapath, priority, match, actions):
-		ofproto = datapath.ofproto
-		parser = datapath.ofproto_parser
-
-		inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
-											 actions)]
-
-		mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
-								match=match, instructions=inst)
-		datapath.send_msg(mod)
-
 
 	@set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
 	def _packet_in_handler(self, ev):
@@ -170,9 +163,42 @@ class Gateways(app_manager.RyuApp):
 		# intercept LLDP and discard
 		if eth.ethertype == ether_types.ETH_TYPE_LLDP:
 			return
-		
-		# Inspect IPv4
-		if eth.ethertype == ether_types.ETH_TYPE_IP:
+		# intercept ARP
+		elif eth.ethertype == ether_types.ETH_TYPE_ARP:
+			arp_header = pkt.get_protocol(arp.arp)
+
+			# learn ip_to_mac_to_port configuration
+			self.ip_to_mac[dp.id][arp_header.src_ip] = arp_header.src_mac
+			self.mac_to_port[dp.id][arp_header.src_mac] = in_port
+
+			# reply to ARPing for gateway, then return
+			if (arp_header.opcode == arp.ARP_REQUEST) and (arp_header.dst_ip == self.gw_ip[dp.id]):
+
+				# reverse the src & dst
+				arp_header.dst_mac = arp_header.src_mac
+				arp_header.dst_ip = arp_header.src_ip
+
+				# inject my identity
+				arp_header.src_mac = self.gw_mac[dp.id]
+				arp_header.src_ip = self.gw_ip[dp.id]
+				arp_header.opcode = arp.ARP_REPLY
+
+				eth.dst = eth.src
+				eth.src = self.gw_mac[dp.id]
+
+				p = packet.Packet()
+				p.add_protocol(eth)
+				p.add_protocol(arp_header)
+				p.serialize()
+
+				actions = [parser.OFPActionOutput(ofproto.OFPP_IN_PORT)]
+				out = parser.OFPPacketOut(datapath=dp, buffer_id=msg.buffer_id,
+								  in_port=in_port, actions=actions, data=p.data)
+				dp.send_msg(out)
+				return
+
+		# Inspect IPv4 if available
+		elif eth.ethertype == ether_types.ETH_TYPE_IP:
 			ipv4_header = pkt.get_protocol(ipv4.ipv4)
 
 			# Intercept IGMP
@@ -184,6 +210,10 @@ class Gateways(app_manager.RyuApp):
 			if ((ip.text_to_int(ipv4_header.dst)>>28) == 0xE):
 				self.logger.debug('discarding multicasting: %s', ipv4_header.dst)
 				return
+
+			# IPv4 switching if available -----------------------------------------------
+			self._ipv4_switching(ev, ipv4_header)
+			return
 		
 		# intercept non-IP and discard for debugging IGMP
 		else:
@@ -201,49 +231,67 @@ class Gateways(app_manager.RyuApp):
 
 
 
-		# Default mode, basic layer2 switching
-		self._layer2_switching(ev, eth)
+		# Default mode, basic layer2 switching ------------------------------------------
+		self._mac_switching(ev, eth)
 
-
-	def _layer2_switching(self, ev, eth):
+	def _ipv4_switching(self, ev, ipv4_header):
 		msg = ev.msg
 		dp = msg.datapath
 		ofproto = dp.ofproto
 		parser = dp.ofproto_parser
 		in_port = msg.match['in_port']
 
-		dst = eth.dst
-		src = eth.src
+
+		# print ("dpid=", dp.id, self.ip_to_mac[dp.id])
+		# print (self.mac_to_port[dp.id])
+
+
+		if ipv4_header.dst in self.ip_to_mac[dp.id]:
+			dst_mac = self.ip_to_mac[dp.id][ipv4_header.dst]
+			dst_port = self.mac_to_port[dp.id][dst_mac]
+			
+			match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=ipv4_header.dst)
+			actions = [parser.OFPActionSetField(eth_dst=dst_mac), parser.OFPActionOutput(dst_port)]
+			inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+			flow_mod = parser.OFPFlowMod(datapath=dp, table_id=self.ipv4_fwd_table, priority=1, match=match, instructions=inst, buffer_id=msg.buffer_id)
+			dp.send_msg(flow_mod)
+
+			# if unbuffered
+			if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+				actions = [parser.OFPActionOutput(dst_port)]
+				out = parser.OFPPacketOut(datapath=dp, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=msg.data)
+				dp.send_msg(out)
+
+
+	def _mac_switching(self, ev, eth):
+		msg = ev.msg
+		dp = msg.datapath
+		ofproto = dp.ofproto
+		parser = dp.ofproto_parser
+		in_port = msg.match['in_port']
 
 		self.logger.debug("packet in dp:%s port:%s type:%s\nsrc:%s dst:%s", 
 			dp.id, in_port, ethertype_bits_to_name[eth.ethertype],
-			src, dst)
+			eth.src, eth.dst)
 
 		# learn a mac address to avoid FLOOD next time.
-		self.mac_to_port[dp.id][src] = in_port
+		self.mac_to_port[dp.id][eth.src] = in_port
 
-		if dst in self.mac_to_port[dp.id]:
-			out_port = self.mac_to_port[dp.id][dst]
-		else:
-			out_port = ofproto.OFPP_FLOOD
+		# install flow for newly learnt mac
+		match = parser.OFPMatch(eth_dst=eth.src)
+		actions = [parser.OFPActionOutput(in_port)]
+		inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+		flow_mod = parser.OFPFlowMod(datapath=dp, priority=1, match=match, instructions=inst)
+		dp.send_msg(flow_mod)
 
-		actions = [parser.OFPActionOutput(out_port)]
+		# flood the ingress packet
+		actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
 
-		# install a flow to avoid packet_in next time
-		if out_port != ofproto.OFPP_FLOOD:
-			match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
-			self.add_flow(dp, 1, match, actions)
-
-		# prevent flooding messaging from one vtep port to other vtep ports
-		if (in_port in self.vtep_ports[dp.id] and out_port == ofproto.OFPP_FLOOD):
-			self.logger.debug("flood packet at dp:%s in from port:%s", dp.id, in_port)
-			actions = [parser.OFPActionOutput(port_it) for port_it in self.reg_ports[dp.id]]
-
-		data = None
+		# if unbuffered
 		if msg.buffer_id == ofproto.OFP_NO_BUFFER:
-			data = msg.data
+			out_data = msg.data
+		else:
+			out_data = None
 
-		out = parser.OFPPacketOut(datapath=dp, buffer_id=msg.buffer_id,
-								  in_port=in_port, actions=actions, data=data)
-
+		out = parser.OFPPacketOut(datapath=dp, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=out_data)
 		dp.send_msg(out)

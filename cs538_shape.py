@@ -29,6 +29,8 @@ def myNetwork():
                       protocol='tcp',
                       port=6653)
 
+
+
     info( '*** Add switches\n')
     s4 = net.addSwitch('s4', cls=OVSKernelSwitch)
     s2 = net.addSwitch('s2', cls=OVSKernelSwitch)
@@ -38,31 +40,44 @@ def myNetwork():
     s1 = net.addSwitch('s1', cls=OVSKernelSwitch)
 
     info( '*** Add hosts\n')
-    h1 = net.addHost('h1', cls=Host, ip='172.16.0.1/24', defaultRoute='via 172.16.0.128')
-    h2 = net.addHost('h2', cls=Host, ip='172.16.0.2/24', defaultRoute='via 172.16.0.128')
-    h3 = net.addHost('h3', cls=Host, ip='172.16.0.3/24', defaultRoute='via 172.16.0.128')
-    h4 = net.addHost('h4', cls=Host, ip='172.16.0.4/24', defaultRoute='via 172.16.0.128')
-    h5 = net.addHost('h5', cls=Host, ip='172.16.0.5/24', defaultRoute='via 172.16.0.128')
-    h6 = net.addHost('h6', cls=Host, ip='172.16.0.6/24', defaultRoute='via 172.16.0.128')
+    h11 = net.addHost('h11', cls=Host, ip='172.16.1.2/24', defaultRoute='via 172.16.1.1')
+    h12 = net.addHost('h12', cls=Host, ip='172.16.1.3/24', defaultRoute='via 172.16.1.1')
+    h13 = net.addHost('h13', cls=Host, ip='172.16.1.4/24', defaultRoute='via 172.16.1.1')
+
+    h21 = net.addHost('h21', cls=Host, ip='172.16.2.2/24', defaultRoute='via 172.16.2.1')
+    h22 = net.addHost('h22', cls=Host, ip='172.16.2.3/24', defaultRoute='via 172.16.2.1')
+    h23 = net.addHost('h23', cls=Host, ip='172.16.2.4/24', defaultRoute='via 172.16.2.1')
+
+    h31 = net.addHost('h31', cls=Host, ip='172.16.3.2/24', defaultRoute='via 172.16.3.1')
+    h32 = net.addHost('h32', cls=Host, ip='172.16.3.3/24', defaultRoute='via 172.16.3.1')
+    h33 = net.addHost('h33', cls=Host, ip='172.16.3.4/24', defaultRoute='via 172.16.3.1')
 
     info( '*** Add links\n')
     
+    # build the ring for core network
     net.addLink(s4, s5)
     net.addLink(s5, s6)
     net.addLink(s6, s4)
 
+    # build links to edge routers
     net.addLink(s1, s4)
     net.addLink(s2, s5)
     net.addLink(s3, s6)
-        
-    net.addLink(s1, h1)
-    net.addLink(s1, h2)
 
-    net.addLink(s2, h3)
-    net.addLink(s2, h4)
+    # s1 hosts
+    net.addLink(s1, h11)
+    net.addLink(s1, h12)
+    net.addLink(s1, h13)
 
-    net.addLink(s3, h5)
-    net.addLink(s3, h6)
+    # s2 hosts
+    net.addLink(s2, h21)
+    net.addLink(s2, h22)
+    net.addLink(s2, h23)
+
+    # s3 hosts
+    net.addLink(s3, h31)
+    net.addLink(s3, h32)
+    net.addLink(s3, h33)
 
     info( '*** Starting network\n')
     net.build()
@@ -71,10 +86,10 @@ def myNetwork():
         controller.start()
 
     info( '*** Starting switches\n')
-    net.get('s4').start([routers])
+    net.get('s4').start([]) #([routers])
     net.get('s2').start([gateways])
-    net.get('s5').start([routers])
-    net.get('s6').start([routers])
+    net.get('s5').start([]) #([routers])
+    net.get('s6').start([]) #([routers])
     net.get('s3').start([gateways])
     net.get('s1').start([gateways])
 

@@ -7,4 +7,4 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$NDDSHOME/lib/x64Linux3gcc5.4.0/:$NDDSHO
 
 export RTI_LICENSE_FILE=/home/user/rti_workspace/5.3.0/rti_license.dat
 
-cd /home/user/rti_workspace/5.3.0
+# cd /home/user/rti_workspace/5.3.0
