@@ -139,7 +139,6 @@ class Gateways(app_manager.RyuApp):
 			# del self.igmp_queriers[dp.id]
 		
 		self.igmp_queriers[dp.id] = IgmpQuerier(ev, self.reg_ports[dp.id], self.vtep_ports[dp.id], 'xterm_IGMP_monitor_'+str(dp.id))
-		self.igmp_queriers[dp.id] = IgmpQuerier(ev, self.reg_ports[dp.id], self.vtep_ports[dp.id], 'xterm_IGMP_monitor_'+str(dp.id))
 
 		self.logger.info('OFPPortDescStatsReply received: %s', dp.id)
 
