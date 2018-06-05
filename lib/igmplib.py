@@ -42,6 +42,7 @@ _mcast_flow_table = 30
 _mcast_flow_cookie = 30
 
 
+# this class controls the action on the switch, translating from RIB to FIB
 class mcast_actioner():
 
 	def __init__(self, ev, dpid_to_mpls):
@@ -106,16 +107,13 @@ class mcast_actioner():
 		
 		self.dp.send_msg(mod)
 
-
-
+# this is a listeners class that keeps track of downstream dst for mcast
 class IgmpListeners():
-	# this is a listener class that keeps track of downstream dst for mcast
 
 	# A few timers according to RFC 3376
 	# Robustness Variable: 2
 	# Query Interval: 125
 	# Query Response Interval: 100 (10 sec)
-
 	def __init__(self, ports_in_grp, port_no, remote_dpid, func_del_port):
 		self.ports_in_grp = ports_in_grp
 		self.port_no = port_no
@@ -152,9 +150,15 @@ class IgmpListeners():
 		self.func_del_port(self.port_no, self.remote_dpid)
 		self.ports_in_grp.pop((self.port_no, self.remote_dpid))
 
+		# delete the mcast group address from the dictionary when the last igmp listeners' class suicides?
+
+# IGMP handling class, essentially making every switch an IGMP querier
 class IgmpQuerier():
 	
-	def __init__(self, ev, all_queriers, ipv4_fwd_table, dpid_to_mpls, northbound, win_path=None):
+	def __init__(self, 
+			ev, 
+			**kwargs):
+
 		self.name = "IgmpQuerier"
 		self.logger = logging.getLogger(self.name)
 
@@ -162,22 +166,25 @@ class IgmpQuerier():
 		dp = msg.datapath
 		ofproto = dp.ofproto
 		parser = dp.ofproto_parser
-
-
 		self.dp = dp
-		self.all_queriers = all_queriers
-		# self.dpid_to_mpls = dpid_to_mpls
-		self.northbound = northbound
-		self._mcast = {}
-		# self._mcast_listeners = mcast_listeners()
-		self._mcast_actioner = mcast_actioner(ev, dpid_to_mpls)
 
+		# remember args
+		self.all_queriers = kwargs['all_queriers']
+		self._ipv4_fwd_table = kwargs['ipv4_fwd_table']
+		self.dpid_to_mpls = kwargs['dpid_to_mpls']
+		self.dpid_to_nb_port = kwargs['dpid_to_nb_port']
+		self.dpids_to_isolate = kwargs['dpids_to_isolate']
+		self.win_path = kwargs['win_path']
+
+
+		# mcast listeners_container/actioner instantiation
+		self._mcast = {}
+		self._mcast_actioner = mcast_actioner(ev, self.dpid_to_mpls)
 
 		# there are 0xfe tables
 		# set up a flow table specifically for multicast
 		self._mcast_flow_table = _mcast_flow_table
 		self._mcast_flow_cookie = _mcast_flow_cookie
-		self._ipv4_flow_table = ipv4_fwd_table
 
 
 		# Always elevate control messages such as IGMP to controllers
@@ -185,15 +192,15 @@ class IgmpQuerier():
 		match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ip_proto=in_proto.IPPROTO_IGMP)
 		actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
 		inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-		flow_mod = parser.OFPFlowMod(datapath=dp, table_id=ipv4_fwd_table, priority=2**16-1, match=match, instructions=inst)
+		flow_mod = parser.OFPFlowMod(datapath=dp, table_id=self._ipv4_fwd_table, priority=2**16-1, match=match, instructions=inst)
 		dp.send_msg(flow_mod)
 
 
 		# set up two tables for different origins-------------------------------------------------------
-		# redirect all multicast traffic from ipv4 table to mcast table, HIGH PRIORITY
+		# redirect all multicast traffic from ipv4 table to mcast table
 		match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst='224.0.0.0/4')
 		inst = [parser.OFPInstructionGotoTable(self._mcast_flow_table)]
-		flow_mod = parser.OFPFlowMod(datapath=dp, table_id=ipv4_fwd_table, priority=10, match=match, instructions=inst)
+		flow_mod = parser.OFPFlowMod(datapath=dp, table_id=self._ipv4_fwd_table, priority=1, match=match, instructions=inst)
 		dp.send_msg(flow_mod)
 
 
@@ -204,10 +211,9 @@ class IgmpQuerier():
 		self.timeout_tid = hub.spawn(self._timer_thread)
 
 		# spawn a monitor
-		self.win_path = win_path
-		if win_path:
-			self.monitor_win = new_fifo_window(win_path)
-			self.monitor_win.write("hello @", win_path, "this dpid:", str(dp.id))
+		if self.win_path:
+			self.monitor_win = new_fifo_window(self.win_path)
+			self.monitor_win.write("hello @", self.win_path, "this dpid:", str(dp.id))
 			self.monitor_tid = hub.spawn(self._monitor_thread)
 
 
@@ -245,9 +251,6 @@ class IgmpQuerier():
 
 	def dispatcher(self, ev):
 		msg = ev.msg
-		dp = msg.datapath
-		ofproto = dp.ofproto
-		parser = dp.ofproto_parser
 		in_port = msg.match['in_port']
 
 		req_pkt = packet.Packet(msg.data)
@@ -257,21 +260,29 @@ class IgmpQuerier():
 			if   (req_igmp.msgtype == igmp.IGMP_TYPE_QUERY):
 				self.monitor_win.write("Querier msg from remote (another querier): discard!!!")
 			elif (req_igmp.msgtype == igmp.IGMP_TYPE_REPORT_V1 or req_igmp.msgtype == igmp.IGMP_TYPE_REPORT_V2):
+				# join locally
 				self.join_handler(req_igmp, req_ipv4, in_port)
-				for dpid, querier in self.all_queriers.items():
-					if dpid != self.dp.id:
-					# northbound on all switches assumed to be 1
+				# if IGMP in at an isolated DP, return
+				if self.dp.id in self.dpids_to_isolate:
+					return
+				# join remotely except isolated DPs
+				for remote_dpid, querier in self.all_queriers.items():
+					if remote_dpid != self.dp.id and remote_dpid not in self.dpids_to_isolate:
 					# send request directly within the controller
-						querier.join_handler(req_igmp, req_ipv4, 1, self.dp.id)
+						querier.join_handler(req_igmp, req_ipv4, self.dpid_to_nb_port[remote_dpid], self.dp.id)
 			elif (req_igmp.msgtype == igmp.IGMP_TYPE_REPORT_V3):
 				self.monitor_win.write("IGMPv3 report in: not yet supported!!!")
 			elif (req_igmp.msgtype == igmp.IGMP_TYPE_LEAVE):
+				# leave locally
 				self.leave_handler(req_igmp, req_ipv4, in_port)
-				for dpid, querier in self.all_queriers.items():
-					if dpid != self.dp.id:
-					# northbound on all switches assumed to be 1
+				# if IGMP in at an isolated DP, return
+				if self.dp.id in self.dpids_to_isolate:
+					return
+				# leave remotely except isolated DPs
+				for remote_dpid, querier in self.all_queriers.items():
+					if remote_dpid != self.dp.id and remote_dpid not in self.dpids_to_isolate:
 					# send request directly within the controller
-						querier.leave_handler(req_igmp, req_ipv4, 1, self.dp.id)
+						querier.leave_handler(req_igmp, req_ipv4, self.dpid_to_nb_port[remote_dpid], self.dp.id)
 		else:
 			self.logger.warning("Not an IGMP packet, impossible!!!")
 
@@ -324,9 +335,6 @@ class IgmpQuerier():
 		dp = self.dp
 		ofproto = dp.ofproto
 		parser = dp.ofproto_parser
-
-		# Group id is 32-bit, the same length as IPv4, reuse it
-
 
 		# mcast addr first used, create mcast group entries, install appropriate flows
 		if (report.address not in self._mcast):

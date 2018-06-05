@@ -24,14 +24,45 @@ from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet, ipv4, in_proto, arp
 from ryu.lib.packet import ether_types
 
+# WSGI REST
+from ryu.app.wsgi import ControllerBase
+from ryu.app.wsgi import Response
+from ryu.app.wsgi import route
+from ryu.app.wsgi import WSGIApplication
+import json
+
 # Custom lib
 from lib.msg_decoder import ethertype_bits_to_name, ofpet_no_to_text
 from lib.igmplib import IgmpQuerier
 from lib.io import new_fifo_window
 
 
+Gateways_name = 'Gateway_API_App'
+highest_priority = 2**16-1
+flow_isolation_cookie = 10
+
+
+"""
+	Table 0 priority:
+	Ether_type categorisation (ARP, IP, MPLS)
+	Ethernet unicast
+	Table miss
+
+	Table 20(IP) priority:
+	Local IP unicast
+	*Remote dst intercepting.
+	Remote IP unicast == Remote IP multicast
+	Table miss
+
+
+"""
+
+
+
 class Gateways(app_manager.RyuApp):
 	OFP_VERSIONS = [ofproto_v1_4.OFP_VERSION]
+	_CONTEXTS = {'wsgi': WSGIApplication}
+
 
 	def __init__(self, *args, **kwargs):
 		super(Gateways, self).__init__(*args, **kwargs)
@@ -51,16 +82,31 @@ class Gateways(app_manager.RyuApp):
 		
 		# UI to be made for these preset parameters, this enables dynamic grid allocation --------------------------------
 		self.dpid_to_mpls = {1: 1, 2: 2, 3: 3}
+		self.dpid_to_nb_port = {1: 1, 2: 1, 3: 1}
+		self.dpids_to_isolate = set()
 		# assign a subnet for each gateway, the first address being the gateway address
 		# give the gateway a mac so that hosts can ARP
-		self.dpid_to_subnet = {1: '172.16.1.0/24', 2: '172.16.2.0/24', 3: '172.16.3.0/24'}
-		self.gw_ip = {1: '172.16.1.1', 2: '172.16.2.1', 3: '172.16.3.1'}
-		self.gw_mac = {1: 'a6:65:bd:ca:2a:79', 2: 'a6:65:bd:ca:2a:17', 3: 'a6:65:bd:ca:2a:f2'}
+		self.dpid_to_gw_ip = {1: '172.16.1.1', 2: '172.16.2.1', 3: '172.16.3.1'}
+		self.dpid_to_smask = {1: '255.255.255.0', 2: '255.255.255.0', 3: '255.255.255.0'}
+		self.dpid_to_gw_mac = {1: 'a6:65:bd:ca:2a:79', 2: 'a6:65:bd:ca:2a:17', 3: 'a6:65:bd:ca:2a:f2'}
+		self.dpid_to_nb_hw_addr = self.dpid_to_gw_mac
+
+		self.dp_list = {}
 		# ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 		self.unhandled = {}
 
-	# invoked such as when a switch connects to this controller
+		# REST API Initialisation
+		# if kwargs['wsgi'] is not None:
+		wsgi = kwargs['wsgi']
+		wsgi.register(ControllerClass, {Gateways_name: self})
+
+
+
+
+
+
+	# invoked when a switch connects to this controller
 	@set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
 	def switch_features_handler(self, ev):
 		dp = ev.msg.datapath
@@ -75,6 +121,7 @@ class Gateways(app_manager.RyuApp):
 
 		self.ip_to_mac.setdefault(dp.id, {})
 		self.mac_to_port.setdefault(dp.id, {})
+		self.dp_list[dp.id] = dp
 
 		# general rules--------------------flow table modification----------------------------vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
 
@@ -82,7 +129,7 @@ class Gateways(app_manager.RyuApp):
 		match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_ARP)
 		actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
 		inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-		flow_mod = parser.OFPFlowMod(datapath=dp, priority=2**16-1, match=match, instructions=inst)
+		flow_mod = parser.OFPFlowMod(datapath=dp, priority=highest_priority, match=match, instructions=inst)
 		dp.send_msg(flow_mod)
 
 		# for IPv4 packets, go to IPv4 table
@@ -105,22 +152,22 @@ class Gateways(app_manager.RyuApp):
 		# general rules--------------------flow table modification----------------------------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 		# install MPLS routing info for regular IP packet (unicast) to remote destinations
-		for dst_dpid, subnet in self.dpid_to_subnet.items():
+		for dst_dpid, dst_gw_ip in self.dpid_to_gw_ip.items():
 			if dp.id != dst_dpid:
 				
-				match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=self.dpid_to_subnet[dst_dpid])
+				match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=(dst_gw_ip, self.dpid_to_smask[dst_dpid]))
 				actions = [parser.OFPActionPushMpls(), 
 							parser.OFPActionSetField(mpls_label=self.dpid_to_mpls[dst_dpid]),
 							parser.OFPActionOutput(1)]
 				inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-				flow_mod = parser.OFPFlowMod(datapath=dp, table_id=self.ipv4_fwd_table, priority=1, match=match, instructions=inst)
+				flow_mod = parser.OFPFlowMod(datapath=dp, table_id=self.ipv4_fwd_table, priority=10, match=match, instructions=inst)
 				dp.send_msg(flow_mod)
 
 
 		# install MPLS routing info for incoming packets
 		# pop MPLS header and run it through the ipv4 flow table
 		match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_MPLS)
-		pop_tag_set_mac = parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, [parser.OFPActionPopMpls(ether_types.ETH_TYPE_IP), parser.OFPActionSetField(eth_src=self.gw_mac[dp.id])])
+		pop_tag_set_mac = parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, [parser.OFPActionPopMpls(ether_types.ETH_TYPE_IP), parser.OFPActionSetField(eth_src=self.dpid_to_gw_mac[dp.id])])
 		next_pipeline = parser.OFPInstructionGotoTable(self.ipv4_fwd_table)
 		inst = [pop_tag_set_mac, next_pipeline]
 		flow_mod = parser.OFPFlowMod(datapath=dp, priority=1, match=match, instructions=inst)
@@ -129,13 +176,32 @@ class Gateways(app_manager.RyuApp):
 
 		# instantiate IGMP classes (which auto-spawns threads)
 		# assuming northbound port is always 1
-		self.igmp_queriers[dp.id] = IgmpQuerier(ev, self.igmp_queriers, self.ipv4_fwd_table, self.dpid_to_mpls, 1, 'xterm_IGMP_monitor_'+str(dp.id))
+		self.igmp_queriers[dp.id] = IgmpQuerier(ev, **{
+				"all_queriers":			self.igmp_queriers,
+				"ipv4_fwd_table":		self.ipv4_fwd_table, 
+				"dpid_to_mpls":			self.dpid_to_mpls, 
+				"dpid_to_nb_port":		self.dpid_to_nb_port,
+				"dpids_to_isolate":		self.dpids_to_isolate,
+				# "win_path":				'xterm_IGMP_monitor_'+str(dp.id)})
+				"win_path":				None})
 
+		# query switch for port description
+		req = parser.OFPPortDescStatsRequest(dp)
+		dp.send_msg(req)
 
 		self.logger.info('Switch initialised: %s', dp.id)
 
+	@set_ev_cls(ofp_event.EventOFPPortDescStatsReply, MAIN_DISPATCHER)
+	def port_desc_stats_reply_handler(self, ev):
+		dp = ev.msg.datapath
+		ofp = dp.ofproto
+		parser = dp.ofproto_parser
 
-
+		for port in ev.msg.body:
+			if port.port_no == self.dpid_to_nb_port[dp.id]:
+				# print ("dpid------no--------addr:", dp.id, port.port_no, port.hw_addr)
+				self.dpid_to_nb_hw_addr[dp.id] = port.hw_addr
+				break
 
 
 	@set_ev_cls(ofp_event.EventOFPErrorMsg, [HANDSHAKE_DISPATCHER, CONFIG_DISPATCHER, MAIN_DISPATCHER])
@@ -158,33 +224,33 @@ class Gateways(app_manager.RyuApp):
 
 		pkt = packet.Packet(msg.data)
 		eth = pkt.get_protocol(ethernet.ethernet)
-
 		
 		# intercept LLDP and discard
 		if eth.ethertype == ether_types.ETH_TYPE_LLDP:
 			return
-		# intercept ARP
+
+		# intercept ARP then return
 		elif eth.ethertype == ether_types.ETH_TYPE_ARP:
 			arp_header = pkt.get_protocol(arp.arp)
+			# ethernet flow mod
+			self._eth_flow_mod(ev, eth)
+			# ipv4 flow mod
+			self._ipv4_flow_mod(ev, eth, arp_header.src_ip)
 
-			# learn ip_to_mac_to_port configuration
-			self.ip_to_mac[dp.id][arp_header.src_ip] = arp_header.src_mac
-			self.mac_to_port[dp.id][arp_header.src_mac] = in_port
-
-			# reply to ARPing for gateway, then return
-			if (arp_header.opcode == arp.ARP_REQUEST) and (arp_header.dst_ip == self.gw_ip[dp.id]):
+			# reply to ARPs for gateway, no l2 switching
+			if (arp_header.opcode == arp.ARP_REQUEST) and (arp_header.dst_ip == self.dpid_to_gw_ip[dp.id]):
 
 				# reverse the src & dst
 				arp_header.dst_mac = arp_header.src_mac
 				arp_header.dst_ip = arp_header.src_ip
 
 				# inject my identity
-				arp_header.src_mac = self.gw_mac[dp.id]
-				arp_header.src_ip = self.gw_ip[dp.id]
+				arp_header.src_mac = self.dpid_to_gw_mac[dp.id]
+				arp_header.src_ip = self.dpid_to_gw_ip[dp.id]
 				arp_header.opcode = arp.ARP_REPLY
 
 				eth.dst = eth.src
-				eth.src = self.gw_mac[dp.id]
+				eth.src = self.dpid_to_gw_mac[dp.id]
 
 				p = packet.Packet()
 				p.add_protocol(eth)
@@ -195,75 +261,55 @@ class Gateways(app_manager.RyuApp):
 				out = parser.OFPPacketOut(datapath=dp, buffer_id=msg.buffer_id,
 								  in_port=in_port, actions=actions, data=p.data)
 				dp.send_msg(out)
-				return
+			# ARPs for another host, flood it
+			else:
+				self._flooding(ev)
+			return
 
 		# Inspect IPv4 if available
 		elif eth.ethertype == ether_types.ETH_TYPE_IP:
 			ipv4_header = pkt.get_protocol(ipv4.ipv4)
 
-			# Intercept IGMP
+			# Intercept IGMP (must return afterwards, or leaks into other dps)
 			if (ipv4_header.proto == in_proto.IPPROTO_IGMP):
 				self.igmp_queriers[dp.id].dispatcher(ev)
 				return
 
-			# Intercept IPv4 Multicasting without flows & Discard
-			if ((ip.text_to_int(ipv4_header.dst)>>28) == 0xE):
-				self.logger.debug('discarding multicasting: %s', ipv4_header.dst)
-				return
-
-			# IPv4 switching if available -----------------------------------------------
-			self._ipv4_switching(ev, ipv4_header)
-			return
+			# For non-IGMP, learn ipv4?
+			# self._ipv4_flow_mod(ev, eth, ipv4_header.src)
 		
-		# intercept non-IP and discard for debugging IGMP
+		# Other ether_type unrecognised by controller, do some statistics, then flood
 		else:
 			self.unhandled.setdefault(eth.ethertype, 0)
-
 			self.unhandled[eth.ethertype] += 1
-
 			# display discarded
 			self.logger.debug('-----------------------')
 			for k,v in self.unhandled.items():
 				self.logger.debug('%s: %d', ethertype_bits_to_name[k], v)
-			
-			# discard!!!!!!!!!!!!!!!!!!!!!
-			# return
+			self._flooding(ev)
 
 
-
-		# Default mode, basic layer2 switching ------------------------------------------
-		self._mac_switching(ev, eth)
-
-	def _ipv4_switching(self, ev, ipv4_header):
+	# should only be called for locally generated packets
+	def _ipv4_flow_mod(self, ev, eth, src_ip):
 		msg = ev.msg
 		dp = msg.datapath
 		ofproto = dp.ofproto
 		parser = dp.ofproto_parser
-		in_port = msg.match['in_port']
 
+		# learn an ip address
+		self.ip_to_mac[dp.id][src_ip] = eth.src
 
-		# print ("dpid=", dp.id, self.ip_to_mac[dp.id])
-		# print (self.mac_to_port[dp.id])
-
-
-		if ipv4_header.dst in self.ip_to_mac[dp.id]:
-			dst_mac = self.ip_to_mac[dp.id][ipv4_header.dst]
-			dst_port = self.mac_to_port[dp.id][dst_mac]
+		if eth.src in self.mac_to_port[dp.id]:
+			src_port = self.mac_to_port[dp.id][eth.src]
 			
-			match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=ipv4_header.dst)
-			actions = [parser.OFPActionSetField(eth_dst=dst_mac), parser.OFPActionOutput(dst_port)]
+			match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=src_ip)
+			actions = [parser.OFPActionSetField(eth_dst=eth.src), parser.OFPActionOutput(src_port)]
 			inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-			flow_mod = parser.OFPFlowMod(datapath=dp, table_id=self.ipv4_fwd_table, priority=1, match=match, instructions=inst, buffer_id=msg.buffer_id)
+			flow_mod = parser.OFPFlowMod(datapath=dp, table_id=self.ipv4_fwd_table, priority=100, match=match, instructions=inst, buffer_id=msg.buffer_id)
 			dp.send_msg(flow_mod)
 
-			# if unbuffered
-			if msg.buffer_id == ofproto.OFP_NO_BUFFER:
-				actions = [parser.OFPActionOutput(dst_port)]
-				out = parser.OFPPacketOut(datapath=dp, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=msg.data)
-				dp.send_msg(out)
-
-
-	def _mac_switching(self, ev, eth):
+	# should only be called for locally generated packets
+	def _eth_flow_mod(self, ev, eth):
 		msg = ev.msg
 		dp = msg.datapath
 		ofproto = dp.ofproto
@@ -274,7 +320,7 @@ class Gateways(app_manager.RyuApp):
 			dp.id, in_port, ethertype_bits_to_name[eth.ethertype],
 			eth.src, eth.dst)
 
-		# learn a mac address to avoid FLOOD next time.
+		# learn a mac address
 		self.mac_to_port[dp.id][eth.src] = in_port
 
 		# install flow for newly learnt mac
@@ -284,9 +330,15 @@ class Gateways(app_manager.RyuApp):
 		flow_mod = parser.OFPFlowMod(datapath=dp, priority=1, match=match, instructions=inst)
 		dp.send_msg(flow_mod)
 
+	def _flooding(self, ev):
+		msg = ev.msg
+		dp = msg.datapath
+		ofproto = dp.ofproto
+		parser = dp.ofproto_parser
+		in_port = msg.match['in_port']
+
 		# flood the ingress packet
 		actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
-
 		# if unbuffered
 		if msg.buffer_id == ofproto.OFP_NO_BUFFER:
 			out_data = msg.data
@@ -295,3 +347,112 @@ class Gateways(app_manager.RyuApp):
 
 		out = parser.OFPPacketOut(datapath=dp, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=out_data)
 		dp.send_msg(out)
+
+
+	def isolate_dpid(self, target_dpid):
+		
+		# # ***hold off this implementation for now***
+		# # make other dps reject incoming traffic from this dp
+		# for other_dpid, dp in dp_list.items():
+		# 	if other_dpid != target_dpid:
+		# 		other_dp = self.dp_list[other_dpid]
+		# 		ofp = other_dp.ofproto
+		# 		parser = other_dp.ofproto_parser
+		# 		# reject IPv4 traffic from target_dpid (unicast+multicast)
+		# 		match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_src=self.dpid_to_subnet???[target_dpid])
+		# 		flow_mod = parser.OFPFlowMod(datapath=dp, table_id=self.ipv4_fwd_table, priority=highest_priority, match=match)
+		# 		other_dp.send_msg(flow_mod)
+		# 		# reject IPv4 traffic towards target_dpid (unicast)
+		# 		match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=self.dpid_to_subnet???[target_dpid])
+		# 		flow_mod = parser.OFPFlowMod(datapath=dp, table_id=self.ipv4_fwd_table, priority=highest_priority, match=match)
+		# 		other_dp.send_msg(flow_mod)
+
+		# 		# set target_dpid's northbound port to null or an invalid port
+		# 		pass
+		# 		# self.igmp_queriers[target_dpid]._mcast_actioner.sync_flow()
+		
+
+		# make this dp reject all northbound traffic by disabling northbound port
+		target_dp = self.dp_list[target_dpid]
+		ofp = target_dp.ofproto
+		parser = target_dp.ofproto_parser
+		
+		port_mod = parser.OFPPortMod(target_dp, 
+			self.dpid_to_nb_port[target_dpid], 
+			self.dpid_to_nb_hw_addr[target_dpid],
+			0b11111111, ofp.OFPPC_PORT_DOWN)
+		target_dp.send_msg(port_mod)
+
+
+		self.dpids_to_isolate.add(target_dpid)
+
+	
+	def deisolate_dpid(self, target_dpid):
+
+		target_dp = self.dp_list[target_dpid]
+		ofp = target_dp.ofproto
+		parser = target_dp.ofproto_parser
+		
+		port_mod = parser.OFPPortMod(target_dp, 
+			self.dpid_to_nb_port[target_dpid], 
+			self.dpid_to_nb_hw_addr[target_dpid],
+			0, ofp.OFPPC_PORT_DOWN)
+		target_dp.send_msg(port_mod)
+
+		self.dpids_to_isolate.discard(target_dpid)
+		
+
+class ControllerClass(ControllerBase):
+
+	def __init__(self, req, link, data, **config):
+		super(ControllerClass, self).__init__(req, link, data, **config)
+		self.gateways_class = data[Gateways_name]
+
+	@route(	name='gateways',
+			path='/gateways/table/{dpid}', 
+			methods=['GET'])
+	def list_table(self, req, **kwargs):
+
+		gateways_class = self.gateways_class
+		dpid = int(kwargs['dpid'])
+
+		if dpid not in gateways_class.mac_to_port:
+			return Response(status=404)
+
+		ip_table = gateways_class.ip_to_mac.get(dpid, {})
+		mac_table = gateways_class.mac_to_port.get(dpid, {})
+		body = json.dumps({"ip_to_mac": ip_table, "mac_to_port": mac_table})
+
+		return Response(content_type='application/json', body=body)
+
+
+	@route(	name='gateways',
+			path='/gateways/isolate/{dpid}',
+			methods=['POST'])
+	def isolate(self, req, **kwargs):
+
+		gateways_class = self.gateways_class
+		dpid = int(kwargs['dpid'])
+
+		if dpid not in gateways_class.mac_to_port:
+			return Response(status=404)
+
+		gateways_class.isolate_dpid(dpid)
+
+		body = json.dumps({"isolate_dpids": list(gateways_class.dpids_to_isolate)})
+		return Response(content_type='application/json', body=body)
+
+	@route(	name='gateways',
+			path='/gateways/deisolate/{dpid}',
+			methods=['POST'])
+	def deisolate(self, req, **kwargs):
+
+		gateways_class = self.gateways_class
+		dpid = int(kwargs['dpid'])
+
+		if dpid not in gateways_class.mac_to_port:
+			return Response(status=404)
+
+		ret = gateways_class.deisolate_dpid(dpid)
+		body = json.dumps({"isolate_dpids": list(gateways_class.dpids_to_isolate)})
+		return Response(content_type='application/json', body=body)

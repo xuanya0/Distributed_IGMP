@@ -1,1 +1,1 @@
-ryu-manager --ofp-tcp-listen-port 6633 gateways.py
+ryu-manager --ofp-tcp-listen-port 6633 gateways.py $@
