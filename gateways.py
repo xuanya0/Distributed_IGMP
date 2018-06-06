@@ -182,8 +182,8 @@ class Gateways(app_manager.RyuApp):
 				"dpid_to_mpls":			self.dpid_to_mpls, 
 				"dpid_to_nb_port":		self.dpid_to_nb_port,
 				"dpids_to_isolate":		self.dpids_to_isolate,
-				# "win_path":				'xterm_IGMP_monitor_'+str(dp.id)})
-				"win_path":				None})
+				"win_path":				'xterm_IGMP_monitor_'+str(dp.id)})
+				# "win_path":				None})
 
 		# query switch for port description
 		req = parser.OFPPortDescStatsRequest(dp)
