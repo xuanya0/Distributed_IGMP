@@ -170,7 +170,7 @@ class IgmpQuerier():
 
 		# remember args
 		self.all_queriers = kwargs['all_queriers']
-		self._ipv4_fwd_table = kwargs['ipv4_fwd_table']
+		self._ipv4_fwd_table_id = kwargs['ipv4_fwd_table_id']
 		self.dpid_to_mpls = kwargs['dpid_to_mpls']
 		self.dpid_to_nb_port = kwargs['dpid_to_nb_port']
 		self.dpids_to_isolate = kwargs['dpids_to_isolate']
@@ -192,7 +192,7 @@ class IgmpQuerier():
 		match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ip_proto=in_proto.IPPROTO_IGMP)
 		actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
 		inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-		flow_mod = parser.OFPFlowMod(datapath=dp, table_id=self._ipv4_fwd_table, priority=2**16-1, match=match, instructions=inst)
+		flow_mod = parser.OFPFlowMod(datapath=dp, table_id=self._ipv4_fwd_table_id, priority=2**16-1, match=match, instructions=inst)
 		dp.send_msg(flow_mod)
 
 
@@ -200,7 +200,7 @@ class IgmpQuerier():
 		# redirect all multicast traffic from ipv4 table to mcast table
 		match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst='224.0.0.0/4')
 		inst = [parser.OFPInstructionGotoTable(self._mcast_flow_table)]
-		flow_mod = parser.OFPFlowMod(datapath=dp, table_id=self._ipv4_fwd_table, priority=1, match=match, instructions=inst)
+		flow_mod = parser.OFPFlowMod(datapath=dp, table_id=self._ipv4_fwd_table_id, priority=1, match=match, instructions=inst)
 		dp.send_msg(flow_mod)
 
 
