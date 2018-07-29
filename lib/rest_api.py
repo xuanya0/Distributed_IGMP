@@ -58,7 +58,7 @@ class ControllerClass(ControllerBase):
 		if dpid not in gateways_class.mac_to_port:
 			return Response(status=404)
 
-		ret = gateways_class.deisolate_dpid(dpid)
+		gateways_class.deisolate_dpid(dpid)
 		body = json.dumps(
 			{"isolated_dpids": list(gateways_class.dpids_to_isolate)})
 		return Response(content_type='application/json', body=body)

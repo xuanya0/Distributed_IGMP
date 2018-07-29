@@ -194,9 +194,8 @@ class Gateways(app_manager.RyuApp):
 	@set_ev_cls(ofp_event.EventOFPPortDescStatsReply, MAIN_DISPATCHER)
 	def port_desc_stats_reply_handler(self, ev):
 		dp = ev.msg.datapath
-		ofp = dp.ofproto
-		parser = dp.ofproto_parser
 
+		
 		for port in ev.msg.body:
 			if port.port_no == self.dpid_to_nb_port[dp.id]:
 				# print ("dpid------no--------addr:", dp.id, port.port_no, port.hw_addr)

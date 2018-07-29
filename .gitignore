@@ -2,3 +2,5 @@
 *.pyc
 **/hello_dynamic
 **/rti_perftest-2.3_x64Linux3gcc4.8.2
+**/foo_idl
+**/cd_dds_hello_world

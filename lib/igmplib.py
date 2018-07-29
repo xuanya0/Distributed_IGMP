@@ -240,7 +240,8 @@ class IgmpQuerier():
 
 	def _timer_thread(self):
 		while True:
-			for addr_grp, egress_dict in self._mcast.items():
+			# self._mcast[addr_grp] == egress_dict
+			for _, egress_dict in self._mcast.items():
 				# generate a list of keys to avoid error
 				# since timer_up could delete a dict
 				for listeners in egress_dict.keys():  
@@ -332,9 +333,6 @@ class IgmpQuerier():
 
 	def join_handler(self, report, req_ipv4, listeners_port, remote_dpid=None):
 		"""the process when the querier received a REPORT message."""
-		dp = self.dp
-		ofproto = dp.ofproto
-		parser = dp.ofproto_parser
 
 		# mcast addr first used, create mcast group entries, install appropriate flows
 		if (report.address not in self._mcast):
