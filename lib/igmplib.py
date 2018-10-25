@@ -80,23 +80,26 @@ class mcast_actioner():
 		ofp_parser = self.dp.ofproto_parser
 
 		# let's try single action list see if it works
-		actions = [ofp_parser.OFPActionPushMpls()]
+		local_actions = []
+		remote_actions = [ofp_parser.OFPActionPushMpls()]
 		for remote_dpid, ports_set in self._mcast_grp_to_actions[mcast_grp_addr].items():
 
 			# if egress untagged, prepend in the action
 			if not remote_dpid:
 				for port in ports_set:
-					actions = [ofp_parser.OFPActionOutput(port)] + actions
+					local_actions.append(ofp_parser.OFPActionOutput(port))
 			# if egress tagged, append in the action:
 			else:
 				for port in ports_set:
-					actions.append(ofp_parser.OFPActionSetField(mpls_label=self.dpid_to_mpls[remote_dpid]))
-					actions.append(ofp_parser.OFPActionOutput(port))
+					remote_actions.append(ofp_parser.OFPActionSetField(mpls_label=self.dpid_to_mpls[remote_dpid]))
+					remote_actions.append(ofp_parser.OFPActionOutput(port))
 
+		if len(remote_actions) <= 1: remote_actions = []
+		actions = local_actions + remote_actions
 		inst = [ofp_parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
 
 		# delete flows if no meaningful actions
-		if len(actions) <= 1:
+		if len(actions) == 0:
 			mod = ofp_parser.OFPFlowMod(datapath=self.dp, cookie=_mcast_flow_cookie, cookie_mask=2**64-1, table_id=_mcast_flow_table, 
 				match=ofp_parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst=mcast_grp_addr), priority=1,
 				command=ofp.OFPFC_DELETE, out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY)

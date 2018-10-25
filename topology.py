@@ -86,10 +86,10 @@ def myNetwork():
         controller.start()
 
     info( '*** Starting switches\n')
-    net.get('s4').start([]) #([routers])
+    net.get('s4').start([routers])
     net.get('s2').start([gateways])
-    net.get('s5').start([]) #([routers])
-    net.get('s6').start([]) #([routers])
+    net.get('s5').start([routers])
+    net.get('s6').start([routers])
     net.get('s3').start([gateways])
     net.get('s1').start([gateways])
 

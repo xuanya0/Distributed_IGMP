@@ -98,7 +98,6 @@ class Gateways(app_manager.RyuApp):
 		wsgi.register(ControllerClass, {Gateways_name: self})
 
 	# invoked when a switch connects to this controller
-
 	@set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
 	def switch_features_handler(self, ev):
 		dp = ev.msg.datapath
