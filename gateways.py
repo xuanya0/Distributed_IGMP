@@ -30,7 +30,7 @@ from ryu.app.wsgi import WSGIApplication
 from lib.msg_decoder import ethertype_bits_to_name, ofpet_no_to_text
 from lib.igmplib import IgmpQuerier
 from lib.rest_api import ControllerClass, Gateways_name
-
+from collections import defaultdict
 
 highest_priority = 2**16 - 1
 flow_isolation_cookie = 10
@@ -86,6 +86,8 @@ class Gateways(app_manager.RyuApp):
 							   2: 'a6:65:bd:ca:2a:17', 
 							   3: 'a6:65:bd:ca:2a:f2'}
 		self.dpid_to_nb_hw_addr = self.dpid_to_gw_mac
+		self.dpid_to_PortNo_to_HwAddr = defaultdict(dict)
+		self.dpid_to_ports_to_isolate = defaultdict(set)
 
 		self.dp_list = {}
 		# ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -117,9 +119,9 @@ class Gateways(app_manager.RyuApp):
 		# general rules--------------------flow table
 		# modification----------------------------vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
 
-		# always elevate ARP to the controller in order to learn IP
+		# always elevate ARP to the controller in order to learn IP (OFPCML_NO_BUFFER for certain OVS version)
 		match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_ARP)
-		actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
+		actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
 		inst = [parser.OFPInstructionActions(
 			ofproto.OFPIT_APPLY_ACTIONS, actions)]
 		flow_mod = parser.OFPFlowMod(
@@ -137,7 +139,7 @@ class Gateways(app_manager.RyuApp):
 		# install table-miss flow entry.
 		# Ryu says use OFPCML_NO_BUFFER due to bug in OVS prior to v2.1.0
 		match = parser.OFPMatch()
-		actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
+		actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
 		inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
 		flow_mod = parser.OFPFlowMod(datapath=dp, priority=0, match=match, instructions=inst)
 		dp.send_msg(flow_mod)
@@ -194,12 +196,9 @@ class Gateways(app_manager.RyuApp):
 	def port_desc_stats_reply_handler(self, ev):
 		dp = ev.msg.datapath
 
-		
 		for port in ev.msg.body:
-			if port.port_no == self.dpid_to_nb_port[dp.id]:
-				# print ("dpid------no--------addr:", dp.id, port.port_no, port.hw_addr)
-				self.dpid_to_nb_hw_addr[dp.id] = port.hw_addr
-				break
+			self.dpid_to_PortNo_to_HwAddr[dp.id][port.port_no] = port.hw_addr
+
 
 	@set_ev_cls(ofp_event.EventOFPErrorMsg, [
 				HANDSHAKE_DISPATCHER, CONFIG_DISPATCHER, MAIN_DISPATCHER])
@@ -347,7 +346,7 @@ class Gateways(app_manager.RyuApp):
 			datapath=dp, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=out_data)
 		dp.send_msg(out)
 
-	def isolate_dpid(self, target_dpid):
+	def port_down(self, target_dpid, target_port):
 
 		# # ***hold off this implementation for now***
 		# # make other dps reject incoming traffic from this dp
@@ -376,26 +375,30 @@ class Gateways(app_manager.RyuApp):
 		parser = target_dp.ofproto_parser
 
 		port_mod = parser.OFPPortMod(target_dp,
-									 self.dpid_to_nb_port[target_dpid],
-									 self.dpid_to_nb_hw_addr[target_dpid],
+									 target_port,
+									 self.dpid_to_PortNo_to_HwAddr[target_dpid][target_port],
 									 0b11111111, ofp.OFPPC_PORT_DOWN)
 		target_dp.send_msg(port_mod)
 
-		self.dpids_to_isolate.add(target_dpid)
+		self.dpid_to_ports_to_isolate[target_dpid].add(target_port)
+		if target_port == 0 or target_port == self.dpid_to_nb_port[target_dpid]:
+			self.dpids_to_isolate.add(target_dpid)
 
-	def deisolate_dpid(self, target_dpid):
+	def port_up(self, target_dpid, target_port):
 
 		target_dp = self.dp_list[target_dpid]
 		ofp = target_dp.ofproto
 		parser = target_dp.ofproto_parser
 
 		port_mod = parser.OFPPortMod(target_dp,
-									 self.dpid_to_nb_port[target_dpid],
-									 self.dpid_to_nb_hw_addr[target_dpid],
+									 target_port,
+									 self.dpid_to_PortNo_to_HwAddr[target_dpid][target_port],
 									 0, ofp.OFPPC_PORT_DOWN)
 		target_dp.send_msg(port_mod)
 
-		self.dpids_to_isolate.discard(target_dpid)
+		self.dpid_to_ports_to_isolate[target_dpid].discard(target_port)
+		if target_port == 0 or target_port == self.dpid_to_nb_port[target_dpid]:
+			self.dpids_to_isolate.discard(target_dpid)
 
 	def allocate_dpid(self, dpid, mpls_label, nb_port, gw_ip, gw_mac, smask):
 

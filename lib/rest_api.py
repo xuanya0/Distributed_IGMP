@@ -2,10 +2,17 @@
 from ryu.app.wsgi import ControllerBase
 from ryu.app.wsgi import Response
 from ryu.app.wsgi import route
+
+from collections import defaultdict
+
 import json
 
 Gateways_name = 'Gateway_API_App'
 
+class EnhancedEncoder(json.JSONEncoder):
+	def default(self, obj):
+		if isinstance(obj, set): return list(obj)
+		return json.JSONEncoder.default(self, obj)
 
 class ControllerClass(ControllerBase):
 
@@ -31,36 +38,49 @@ class ControllerClass(ControllerBase):
 		return Response(content_type='application/json', body=body)
 
 	@route(	name=None,
-			path='/gateways/isolate/{dpid}',
+			path='/gateways/isolate/{dpid}/{port_no}',
 			methods=['POST'])
 	def isolate(self, req, **kwargs):
 
 		gateways_class = self.gateways_class
 		dpid = int(kwargs['dpid'])
+		port_no = int(kwargs['port_no'])
 
 		if dpid not in gateways_class.mac_to_port:
 			return Response(status=404)
 
-		gateways_class.isolate_dpid(dpid)
+		if port_no == 0:
+			for port_no in gateways_class.dpid_to_PortNo_to_HwAddr:
+				gateways_class.port_down(dpid, port_no)
+		else:
+			gateways_class.port_down(dpid, port_no)
 
 		body = json.dumps(
-			{"isolated_dpids": list(gateways_class.dpids_to_isolate)})
+			{"isolated_dpids_ports": gateways_class.dpid_to_ports_to_isolate},
+			cls=EnhancedEncoder)
 		return Response(content_type='application/json', body=body)
 
 	@route(	name=None,
-			path='/gateways/deisolate/{dpid}',
+			path='/gateways/deisolate/{dpid}/{port_no}',
 			methods=['POST'])
 	def deisolate(self, req, **kwargs):
 
 		gateways_class = self.gateways_class
 		dpid = int(kwargs['dpid'])
+		port_no = int(kwargs['port_no'])
 
 		if dpid not in gateways_class.mac_to_port:
 			return Response(status=404)
 
-		gateways_class.deisolate_dpid(dpid)
+		if port_no == 0:
+			for port_no in gateways_class.dpid_to_PortNo_to_HwAddr:
+				gateways_class.port_up(dpid, port_no)
+		else:
+			gateways_class.port_up(dpid, port_no)
+
 		body = json.dumps(
-			{"isolated_dpids": list(gateways_class.dpids_to_isolate)})
+			{"isolated_dpids_ports": gateways_class.dpid_to_ports_to_isolate},
+			cls=EnhancedEncoder)
 		return Response(content_type='application/json', body=body)
 
 	@route(	name=None,

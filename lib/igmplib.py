@@ -199,7 +199,7 @@ class IgmpQuerier():
 		dp.send_msg(flow_mod)
 
 
-		# set up two tables for different origins-------------------------------------------------------
+		# set up only ONE table for whatever packet origins--------------------------------------------------
 		# redirect all multicast traffic from ipv4 table to mcast table
 		match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_dst='224.0.0.0/4')
 		inst = [parser.OFPInstructionGotoTable(self._mcast_flow_table)]
