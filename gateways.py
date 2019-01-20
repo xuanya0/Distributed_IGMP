@@ -22,6 +22,7 @@ from ryu.ofproto import ofproto_v1_4
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet, ipv4, in_proto, arp
 from ryu.lib.packet import ether_types
+from ryu.lib import ip
 
 # WSGI REST
 from ryu.app.wsgi import WSGIApplication
@@ -128,6 +129,15 @@ class Gateways(app_manager.RyuApp):
 			datapath=dp, priority=highest_priority, match=match, instructions=inst)
 		dp.send_msg(flow_mod)
 
+		# always flood IEC 61850/GOOSE (EtherType: 0x88b8)
+		match = parser.OFPMatch(eth_type=0x88b8)
+		actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD, ofproto.OFPCML_NO_BUFFER)]
+		inst = [parser.OFPInstructionActions(
+			ofproto.OFPIT_APPLY_ACTIONS, actions)]
+		flow_mod = parser.OFPFlowMod(
+			datapath=dp, priority=highest_priority, match=match, instructions=inst)
+		dp.send_msg(flow_mod)
+
 		# for IPv4 packets, go to IPv4 table
 		match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP)
 		next_pipeline = parser.OFPInstructionGotoTable(self.ipv4_fwd_table_id)
@@ -228,6 +238,15 @@ class Gateways(app_manager.RyuApp):
 		# intercept ARP then return
 		elif eth.ethertype == ether_types.ETH_TYPE_ARP:
 			arp_header = pkt.get_protocol(arp.arp)
+
+			# discard packets from unrecognized subnet
+			# to deal with problem stemming from link-local addr autoconfig
+			if not self._same_subnet(
+					arp_header.src_ip, 
+					self.dpid_to_gw_ip[dp.id], 
+					self.dpid_to_smask[dp.id]):	
+				return
+
 			# ethernet flow mod
 			self._eth_flow_mod(ev, eth)
 			# ipv4 flow mod
@@ -266,6 +285,15 @@ class Gateways(app_manager.RyuApp):
 		elif eth.ethertype == ether_types.ETH_TYPE_IP:
 			ipv4_header = pkt.get_protocol(ipv4.ipv4)
 
+			# discard packets from unrecognized subnet
+			# to deal with problem stemming from link-local addr autoconfig
+			if not self._same_subnet(
+					ipv4_header.src, 
+					self.dpid_to_gw_ip[dp.id], 
+					self.dpid_to_smask[dp.id]):
+				return
+
+
 			# Intercept IGMP (must return afterwards, or leaks into other dps)
 			if (ipv4_header.proto == in_proto.IPPROTO_IGMP):
 				self.igmp_queriers[dp.id].dispatcher(ev)
@@ -285,8 +313,18 @@ class Gateways(app_manager.RyuApp):
 				self.logger.debug('%s: %d', ethertype_bits_to_name[k], v)
 			self._flooding(ev)
 
-	# should only be called for locally generated packets
+	def _same_subnet(self, alpha, bravo, smask):
 
+		alpha_int = alpha if type(alpha) == type(int()) else ip.ipv4_to_int(alpha)
+		bravo_int = bravo if type(bravo) == type(int()) else ip.ipv4_to_int(bravo)
+		smask_int = smask if type(smask) == type(int()) else ip.ipv4_to_int(smask)
+		
+		if (alpha_int ^ bravo_int) & smask_int:
+			print (alpha + ' and ' + bravo + ' are not in the same subnet: ' + smask)
+		
+		return (alpha_int ^ bravo_int) & smask_int == 0
+
+	# should only be called for locally generated packets
 	def _ipv4_flow_mod(self, ev, eth, src_ip):
 		msg = ev.msg
 		dp = msg.datapath

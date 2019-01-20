@@ -72,6 +72,13 @@ class mcast_actioner():
 		self._mcast_grp_to_actions[mcast_grp_addr][remote_dpid].discard(port)
 		self.sync_flow(mcast_grp_addr)
 
+		# bottom-up clean up  (side effects not yet tested)
+		if not self._mcast_grp_to_actions[mcast_grp_addr][remote_dpid]:
+			del self._mcast_grp_to_actions[mcast_grp_addr][remote_dpid]
+		if not self._mcast_grp_to_actions[mcast_grp_addr]:
+			del self._mcast_grp_to_actions[mcast_grp_addr]
+
+
 	def sync_flow(self, mcast_grp_addr):
 		# egress tagging should be in the format of a dict
 		# e.g. {'vlan_vid': 0x1000}, {'mpls_label': 0x12345678}
@@ -366,5 +373,7 @@ class IgmpQuerier():
 		if report.address in self._mcast:
 			if (listeners_port, remote_dpid) in self._mcast[report.address]:
 				self._mcast[report.address][(listeners_port, remote_dpid)].del_listener(req_ipv4.src)
-
-
+			
+			# clean the upper level
+			if not self._mcast[report.address]:
+				del self._mcast[report.address]
